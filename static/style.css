@@ -532,14 +532,14 @@ body {
      46vh：比原先的 58vh 矮一些，好和下面三张卡一起放进一屏，又不至于让卡片拉伸留出大片空白。 */
   .perf-top { flex: 0 1 auto; height: 46vh; min-height: 200px; }
 
-  /* 性能页也做成一屏：三张卡吃掉剩余高度，内容超出时卡片内部滚动 */
+  /* 性能页也做成一屏：三张卡吃掉剩余高度（基准 0，避免被内容总高顶开），内容超出时卡片内部滚动 */
   body[data-page="performance"] .app {
     height: 100vh;
     min-height: 0;
     overflow: hidden;
   }
 
-  .perf-bottom { flex: 1 1 auto; min-height: 0; }
+  .perf-bottom { flex: 1 1 0; min-height: 0; }
 }
 
 /* ---- 上半部分：一张大卡（左列数值 + 右侧大曲线） ---- */
@@ -924,8 +924,8 @@ body {
   /* 网速卡高度是性能页大卡的一半 */
   .net-top { height: 29vh; min-height: 160px; }
 
-  /* 下面三张卡吃掉剩余空间，内容超了就卡片内部滚动，不撑破一屏 */
-  .net-bottom { flex: 1 1 auto; min-height: 0; }
+  /* 下面三张卡吃掉剩余空间（基准 0），内容超了就卡片内部滚动，不撑破一屏 */
+  .net-bottom { flex: 1 1 0; min-height: 0; }
 }
 
 /* 「下载 / 上传」两个大数字上下排列（参考图的左列） */
@@ -1002,4 +1002,200 @@ body {
   /* 极端矮屏（如手机横屏）下省略左列次要的一行，避免撑出卡片 */
   .perf-top-left .side-note.dim { display: none; }
   .perf-top-left { flex: 0 0 180px; }
+}
+
+/* ---------------- 服务页 ---------------- */
+
+/* 和性能/网络页一致：桌面端与横屏一屏显示，卡片内容超出时内部滚动 */
+@media (min-width: 901px) {
+  body[data-page="services"] .app {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .svc-top { height: 32vh; min-height: 150px; }
+  .svc-bottom { flex: 1 1 0; min-height: 0; }   /* 基准 0：只吃剩余空间，不被内容总高顶开 */
+}
+
+.svc-top {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: minmax(0, 1fr);   /* 允许行高收缩，内部滚动容器才生效 */
+  gap: 14px;
+}
+
+.svc-bottom {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 14px;
+}
+
+.svc-top .card, .svc-bottom .card { min-height: 0; }
+.svc-top .card-body, .svc-bottom .card-body { display: flex; flex-direction: column; }
+
+.probe-rows, .container-rows, .systemd-rows, .port-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.svc-tip {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.5;
+  margin-top: 6px;
+}
+
+/* 远程服务器：状态点 + 名称 + 延迟条 + 数值 */
+.probe-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12.5px;
+  border-bottom: 1px dashed var(--line-soft);
+}
+
+.probe-name {
+  flex: 0 0 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.probe-bar {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+
+.probe-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 4px;
+  background: var(--green);
+  transition: width 0.4s ease;
+}
+
+.probe-bar i.down { background: var(--pink); }
+
+.probe-ms {
+  flex: 0 0 76px;
+  text-align: right;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 容器：状态徽标 + 名称 + 运行状态 + 镜像 */
+.container-row {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) 132px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  font-size: 12.5px;
+}
+
+.state-chip {
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.state-chip.up { background: rgba(61, 220, 151, 0.16); color: var(--green); }
+.state-chip.down { background: rgba(255, 255, 255, 0.08); color: var(--dim); }
+
+.container-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.container-status { color: var(--muted); font-size: 11.5px; }
+
+.container-image {
+  color: var(--dim);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 监听端口：端口 / 进程或常见用途 / 协议 / 谁能访问 */
+.port-head, .port-row {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr) 66px 74px;
+  gap: 10px;
+  align-items: center;
+}
+
+.port-head {
+  flex: none;
+  padding: 4px 0 6px;
+  font-size: 11.5px;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.port-row {
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  font-size: 12.5px;
+}
+
+.port-num { font-variant-numeric: tabular-nums; }
+.port-proc { color: var(--text); }
+.port-known { color: var(--muted); }
+.port-proto { color: var(--dim); font-size: 11.5px; }
+.port-scope { font-size: 11.5px; }
+.port-scope.wide { color: #ffb74d; }
+.port-scope.local { color: var(--muted); }
+
+/* 系统服务：单元名 + 描述 */
+.systemd-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  font-size: 12px;
+}
+
+.systemd-row .unit { flex: none; color: var(--text); }
+
+.systemd-row .desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--dim);
+  font-size: 11.5px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .svc-top, .svc-bottom { grid-template-columns: 1fr; }
+  .svc-top { height: auto; }
+  .probe-rows, .container-rows, .systemd-rows, .port-rows { overflow: visible; }
+  .container-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+  .container-status { flex: 1 1 auto; text-align: right; }
+  .container-image { flex: 1 1 100%; }
+}
+
+/* 矮视口横屏：和服务页一起收紧，保证仍然一屏 */
+@media (min-width: 901px) and (max-height: 730px) {
+  .svc-top { height: 26vh; min-height: 130px; }
+  .probe-row, .container-row, .port-row, .systemd-row { font-size: 11.5px; padding: 4px 0; }
+  .container-row { grid-template-columns: 54px minmax(0, 1fr) 118px minmax(0, 1fr); }
+  .port-head, .port-row { grid-template-columns: 56px minmax(0, 1fr) 60px 68px; }
+  .svc-tip { font-size: 11px; margin-top: 4px; }
 }

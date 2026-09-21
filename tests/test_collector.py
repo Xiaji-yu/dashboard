@@ -4,10 +4,12 @@
 所以每种失败都要有用例守着。
 """
 
+import json
 import os
 import shutil
 import socket
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -15,9 +17,10 @@ from unittest import mock
 
 import psutil
 
+import collector as collector_module
 from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, container_id_from_cgroup,
-                       is_virtual_nic, is_wireless_nic, listen_ports, parse_default_gateway,
-                       pick_nic, temp_entry_key)
+                       format_sockaddr, is_virtual_nic, is_wireless_nic, listen_ports,
+                       listen_sockets, parse_default_gateway, pick_nic, temp_entry_key)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -410,6 +413,145 @@ class NetworkDiskInfoTest(unittest.TestCase):
         values = server.series_values(snapshot)
         self.assertEqual(values["disk_read"], 1234.5)
         self.assertEqual(values["disk_write"], 67.8)
+
+
+class ListenSocketsTest(unittest.TestCase):
+    """解析 /proc/net/tcp{,6}：端口 + 绑定地址 + 谁能访问。"""
+
+    PROC_TCP = (
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        "   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345\n"
+        "   1: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12346\n"
+        "   2: 0100007F:C350 0100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000 0 12347\n"
+    )
+    PROC_TCP6 = "  sl  local_address                         rem_address   st inode\n"
+
+    @classmethod
+    def _patch_open(cls):
+        def fake_open(path, *args, **kwargs):
+            if path == "/proc/net/tcp":
+                return mock.mock_open(read_data=cls.PROC_TCP)()
+            if path == "/proc/net/tcp6":
+                return mock.mock_open(read_data=cls.PROC_TCP6)()
+            raise OSError("no such file")
+        return mock.patch("builtins.open", side_effect=fake_open)
+
+    def test_scope_from_bind_address(self):
+        with self._patch_open():
+            rows = listen_sockets()
+        self.assertEqual([row["port"] for row in rows], [53, 8080])   # 已建立那条要忽略
+        self.assertEqual(rows[0]["scope"], "仅本机")
+        self.assertEqual(rows[1]["scope"], "局域网")
+        self.assertEqual(rows[1]["addr"], "0.0.0.0")
+        self.assertEqual(rows[1]["proto"], "tcp")
+
+    def test_format_sockaddr(self):
+        self.assertEqual(format_sockaddr("0100007F", False), "127.0.0.1")
+        self.assertEqual(format_sockaddr("00000000", False), "0.0.0.0")
+        self.assertEqual(format_sockaddr("zzzz", False), "zzzz")
+        self.assertEqual(format_sockaddr("00000000000000000000000000000000", True), "::")
+
+
+class ServicePortsTest(unittest.TestCase):
+    """端口合并：同一端口在 tcp/tcp6 各一条时合成一行，范围取更宽的。"""
+
+    def _collector(self):
+        collector = Collector.__new__(Collector)
+        collector._port_procs = {8080: "python3"}   # 真实实现用 int 端口做键
+        collector._port_procs_at = time.time() + 3600   # 别触发刷新
+        collector._port_procs_lock = threading.Lock()
+        return collector
+
+    def test_merge_and_scope(self):
+        collector = self._collector()
+        sockets = [
+            {"port": 22, "proto": "tcp", "addr": "0.0.0.0", "scope": "局域网"},
+            {"port": 22, "proto": "tcp6", "addr": "::", "scope": "局域网"},
+            {"port": 631, "proto": "tcp", "addr": "127.0.0.1", "scope": "仅本机"},
+            {"port": 8080, "proto": "tcp", "addr": "0.0.0.0", "scope": "局域网"},
+        ]
+        with mock.patch.object(collector_module, "listen_sockets", return_value=sockets):
+            rows = collector.service_ports()
+        by_port = {row["port"]: row for row in rows}
+        self.assertEqual(by_port[22]["proto"], "tcp/tcp6")
+        self.assertEqual(by_port[22]["addr"], "0.0.0.0", "地址应保留先出现的 IPv4")
+        self.assertEqual(by_port[22]["known"], "SSH")
+        self.assertEqual(by_port[631]["scope"], "仅本机")
+        self.assertEqual(by_port[8080]["process"], "python3")
+        self.assertIsNone(by_port[8080]["known"], "有进程名时不必给常见用途提示")
+
+    def test_systemd_parsing(self):
+        output = (
+            "ssh.service                loaded active running OpenBSD Secure Shell server\n"
+            "docker.service             loaded active running Docker Application Container Engine\n"
+            "not-a-service              loaded active running 忽略这一行\n"
+        )
+        done = mock.Mock(returncode=0, stdout=output, stderr="")
+        with mock.patch("collector.subprocess.run", return_value=done):
+            result = Collector._collect_systemd()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["list"][0]["unit"], "docker.service")
+        self.assertEqual(result["list"][0]["description"],
+                         "Docker Application Container Engine")
+
+    def test_systemd_absent(self):
+        with mock.patch("collector.subprocess.run", side_effect=FileNotFoundError):
+            result = Collector._collect_systemd()
+        self.assertFalse(result["available"])
+        self.assertIn("systemctl", result["reason"])
+
+
+class ProbeTargetsTest(unittest.TestCase):
+    """probes.json 读取：默认没文件不算错误，格式错误要报出来，mtime 变了要重载。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "probes.json")
+        env = mock.patch.dict(os.environ, {"DASHBOARD_PROBES": self.path})
+        env.start()
+        self.addCleanup(env.stop)
+        self.collector = Collector.__new__(Collector)
+        self.collector._probes_cache = ([], None, None)
+
+    def test_missing_file_is_not_an_error(self):
+        targets, error, _mtime = self.collector.probe_targets()
+        self.assertEqual(targets, [])
+        self.assertIsNone(error)
+
+    def test_parses_targets_and_skips_incomplete(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"probes": [
+                {"name": "腾讯云", "host": "1.2.3.4", "port": 443},
+                {"name": "缺端口", "host": "example.com"},
+                {"host": "9.9.9.9", "port": "53"},
+            ]}, handle)
+        targets, error, _mtime = self.collector.probe_targets()
+        self.assertIsNone(error)
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(targets[0], {"name": "腾讯云", "host": "1.2.3.4", "port": 443})
+        self.assertEqual(targets[1]["name"], "9.9.9.9", "没有名字就用 host")
+        self.assertEqual(targets[1]["port"], 53)
+
+    def test_broken_json_reports_error(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("{ 这不是 JSON")
+        targets, error, _mtime = self.collector.probe_targets()
+        self.assertEqual(targets, [])
+        self.assertIn("probes.json", error)
+
+    def test_reloads_when_file_changes(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"probes": [{"name": "A", "host": "1.1.1.1", "port": 80}]}, handle)
+        self.assertEqual(len(self.collector.probe_targets()[0]), 1)
+        time.sleep(0.01)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"probes": [
+                {"name": "A", "host": "1.1.1.1", "port": 80},
+                {"name": "B", "host": "2.2.2.2", "port": 22}]}, handle)
+        os.utime(self.path, (time.time() + 1, time.time() + 1))
+        self.assertEqual(len(self.collector.probe_targets()[0]), 2, "mtime 变了应重载")
 
 
 class PowerRaplTest(unittest.TestCase):

@@ -8,6 +8,7 @@
   GET /api/performance       性能与电源：每核占用、温度、风扇、GPU、电池、内存构成
   GET /api/processes         全部进程（含命令行、用户、容器归属）
   GET /api/network           网络与磁盘：网卡、连接、网关/外网延迟、磁盘容量与读写
+  GET /api/services          服务：容器、systemd 服务、监听端口、远程探测延迟
   GET /api/series?since=TS   曲线数据；省略 since 返回整个时间窗口
   GET /api/series?keys=a,b   只返回指定曲线键（未知键返回 400）
 
@@ -51,7 +52,7 @@ PERCORE_KEY_RE = re.compile(r"cpu\d{1,2}")
 
 state_lock = threading.Lock()
 state = {"snapshot": None, "history": History(), "series_ts": 0.0,
-         "processes": [], "network": {}}
+         "processes": [], "network": {}, "services": {}}
 
 
 def valid_series_key(key):
@@ -118,11 +119,13 @@ def sampler(collector):
             snapshot["processes"] = rows[:6]
             snapshot["process_count"] = len(rows)
             network = collector.network_info()
+            services = collector.services_detail()
             with state_lock:
                 state["snapshot"] = snapshot
                 state["series_ts"] = snapshot["ts"]
                 state["processes"] = rows
                 state["network"] = network
+                state["services"] = services
                 for key, value in series_values(snapshot).items():
                     state["history"].append(key, snapshot["ts"], value)
                 for key, value in performance_series(snapshot).items():
@@ -150,6 +153,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self._processes())
         if path == "/api/network":
             return self._send_json(self._network())
+        if path == "/api/services":
+            return self._send_json(self._services())
         if path == "/api/series":
             query = parse_qs(parsed.query)
             raw = query.get("since", ["0"])[0]
@@ -200,6 +205,19 @@ class Handler(BaseHTTPRequestHandler):
         payload["ready"] = True
         payload["ts"] = snapshot["ts"]
         payload["window"] = WINDOW_SECONDS
+        payload["interval"] = INTERVAL
+        return payload
+
+    @staticmethod
+    def _services():
+        with state_lock:
+            services = state["services"]
+            snapshot = state["snapshot"]
+        if not services or snapshot is None:
+            return {"ready": False, "window": WINDOW_SECONDS}
+        payload = dict(services)
+        payload["ready"] = True
+        payload["ts"] = snapshot["ts"]
         payload["interval"] = INTERVAL
         return payload
 

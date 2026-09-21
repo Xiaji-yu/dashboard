@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -45,12 +47,76 @@ CONTAINER_ID_RE = re.compile(
     r"(?:docker-|/docker/|cri-containerd-|/cri-containerd/|libpod-)([0-9a-f]{12,64})"
 )
 
+# 端口 -> 常见用途（拿不到进程名时的提示；键是 IANA 惯例，标注为「常见用途」而非事实）
+KNOWN_PORTS = {
+    22: "SSH", 53: "DNS", 80: "HTTP", 443: "HTTPS", 631: "CUPS 打印",
+    2375: "Docker API", 2376: "Docker API (TLS)", 3306: "MySQL", 5432: "PostgreSQL",
+    6379: "Redis", 8123: "Home Assistant", 8282: "本总控台", 11434: "Ollama",
+    27017: "MongoDB",
+}
+# 远程探测：网关/外网每 10 秒一次，probes.json 里的目标每 30 秒一次（别太频繁打人家）
+NET_PROBE_INTERVAL = 10.0
+PROBE_TARGET_INTERVAL = 30.0
+PROBE_TARGET_TIMEOUT = 1.5
+# systemd 服务列表的缓存时间
+SYSTEMD_TTL = 10.0
+
 # 常见代理端口（「本地代理」一行用；8080 太通用，刻意不算）
 PROXY_PORTS = (7890, 7891, 1080, 1081, 8118, 3128, 8889, 7897)
 # 延迟探测：网关试这几个端口取最快的一个；外网目标可用环境变量改
 GATEWAY_PROBE_PORTS = (53, 22, 443, 80)
 NET_PROBE_TARGET = os.environ.get("DASHBOARD_NET_TARGET", "www.baidu.com:443")
-NET_PROBE_INTERVAL = 10.0
+
+
+def probes_path():
+    """远程探测目标配置文件（可用 DASHBOARD_PROBES 指向别处）。"""
+    return os.environ.get("DASHBOARD_PROBES") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "probes.json")
+
+
+def format_sockaddr(addr_hex, is_v6):
+    """把 /proc/net/tcp{,6} 里的十六进制地址还原成可读 IP。"""
+    try:
+        if is_v6:
+            return socket.inet_ntop(socket.AF_INET6, bytes.fromhex(addr_hex))
+        return socket.inet_ntoa(struct.pack("<I", int(addr_hex, 16)))
+    except (ValueError, OSError):
+        return addr_hex
+
+
+def listen_sockets():
+    """监听中的 TCP 端口，附带绑定地址与访问范围。
+
+    「仅本机」= 绑在 127.x / ::1，只有本机能连；「局域网」= 绑在 0.0.0.0 / ::，
+    同网段的机器都能连（参考图里的「谁能访问」一列）。
+    """
+    rows = []
+    for path, is_v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
+        try:
+            with open(path, "r") as handle:
+                next(handle, None)
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) < 4 or fields[3] != "0A":   # 0A = LISTEN
+                        continue
+                    try:
+                        addr_hex, port_hex = fields[1].rsplit(":", 1)
+                        port = int(port_hex, 16)
+                    except (IndexError, ValueError):
+                        continue
+                    addr = format_sockaddr(addr_hex, is_v6)
+                    if addr in ("0.0.0.0", "::"):
+                        scope = "局域网"
+                    elif addr.startswith("127.") or addr == "::1" or addr.endswith("127.0.0.1"):
+                        scope = "仅本机"
+                    else:
+                        scope = "其他"
+                    rows.append({"port": port, "proto": "tcp6" if is_v6 else "tcp",
+                                 "addr": addr, "scope": scope})
+        except OSError:
+            continue
+    rows.sort(key=lambda item: item["port"])
+    return rows
 
 
 def is_wireless_nic(name):
@@ -205,6 +271,13 @@ class Collector:
         self._core_topology = self._read_core_topology()
         self._disk_io_prev = None
         self._disk_static_cache = None
+        self._port_procs = None
+        self._port_procs_at = 0.0
+        self._port_procs_lock = threading.Lock()
+        self._systemd = None
+        self._systemd_at = 0.0
+        self._systemd_lock = threading.Lock()
+        self._probes_cache = ([], None, None)
         self._gateway = self._read_gateway()
         self._probe = {"gateway_ms": None, "internet_ms": None,
                        "internet_target": NET_PROBE_TARGET, "at": 0.0}
@@ -707,10 +780,13 @@ class Collector:
             return None
 
     def probe_loop(self):
-        """后台线程：定期测网关与外网延迟。
+        """后台线程：定期测网关、外网与 probes.json 里配置的远程目标。
 
         放在独立线程里，避免连接超时拖慢 1 秒采样；页面读的是最近一次结果。
+        网关/外网每 10 秒一次；配置的远程目标每 30 秒一次（别太频繁打人家）。
         """
+        targets_at = 0.0
+        target_results = []
         while True:
             started = time.time()
             gateway_ms = None
@@ -719,16 +795,58 @@ class Collector:
                     value = self.tcp_latency(self._gateway, port)
                     if value is not None:
                         gateway_ms = value if gateway_ms is None else min(gateway_ms, value)
-            target = NET_PROBE_TARGET
-            host, _, port_text = target.rpartition(":")
+            host, _, port_text = NET_PROBE_TARGET.rpartition(":")
             try:
                 port = int(port_text or "443")
             except ValueError:
-                host, port = target, 443
+                host, port = NET_PROBE_TARGET, 443
             internet_ms = self.tcp_latency(host, port, timeout=2.0) if host else None
+
+            if started - targets_at >= PROBE_TARGET_INTERVAL:
+                configured, _error, _mtime = self.probe_targets()
+                target_results = [
+                    dict(item, ms=self.tcp_latency(item["host"], item["port"],
+                                                   timeout=PROBE_TARGET_TIMEOUT))
+                    for item in configured
+                ]
+                targets_at = started
+
             self._probe = {"gateway_ms": gateway_ms, "internet_ms": internet_ms,
-                           "internet_target": target, "at": time.time()}
+                           "internet_target": NET_PROBE_TARGET, "at": time.time(),
+                           "targets": target_results}
             time.sleep(max(1.0, NET_PROBE_INTERVAL - (time.time() - started)))
+
+    def probe_targets(self):
+        """读取 probes.json 里的远程探测目标。
+
+        返回 (targets, error, mtime)；文件改了不用重启服务，mtime 变了就重载。
+        """
+        path = probes_path()
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            self._probes_cache = ([], None, None)
+            return self._probes_cache
+        if self._probes_cache[2] == mtime:
+            return self._probes_cache
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            targets = []
+            for item in (data.get("probes") or []):
+                host = (item or {}).get("host")
+                port = (item or {}).get("port")
+                if not host or not port:
+                    continue
+                try:
+                    targets.append({"name": item.get("name") or str(host),
+                                    "host": str(host), "port": int(port)})
+                except (TypeError, ValueError):
+                    continue
+            self._probes_cache = (targets, None, mtime)
+        except (OSError, ValueError, TypeError) as exc:
+            self._probes_cache = ([], f"probes.json 读取失败：{exc}", mtime)
+        return self._probes_cache
 
     def _nic_info(self):
         if not self.nic:
@@ -885,6 +1003,105 @@ class Collector:
         self._disk_io_prev = (now, counters.read_bytes, counters.write_bytes)
         return out
 
+    # ---------------- 服务页：端口 / systemd / 容器 / 远程探测 ----------------
+
+    def _port_processes(self):
+        """端口 -> 进程名。非 root 只能映射自己拥有的进程（读不到 root 进程的 /proc/<pid>/fd）。"""
+        with self._port_procs_lock:
+            now = time.time()
+            if self._port_procs is None or now - self._port_procs_at > SERVICES_TTL:
+                mapping = {}
+                try:
+                    for conn in psutil.net_connections(kind="inet"):
+                        if conn.status != "LISTEN" or not conn.pid or not conn.laddr:
+                            continue
+                        try:
+                            mapping.setdefault(conn.laddr.port, psutil.Process(conn.pid).name())
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                except Exception:
+                    pass
+                self._port_procs = mapping
+                self._port_procs_at = now
+            return self._port_procs
+
+    def service_ports(self):
+        """监听端口表：同一端口可能在 tcp/tcp6 各有一条，合并成一行，范围取更宽的。"""
+        processes = self._port_processes()
+        merged = {}
+        for item in listen_sockets():
+            row = merged.get(item["port"])
+            if row is None:
+                merged[item["port"]] = {
+                    "port": item["port"], "proto": item["proto"],
+                    "addr": item["addr"], "scope": item["scope"],
+                    "process": processes.get(item["port"]),
+                    "known": KNOWN_PORTS.get(item["port"]),
+                }
+                continue
+            if item["proto"] not in row["proto"].split("/"):
+                row["proto"] = "/".join(sorted({row["proto"], item["proto"]}))
+            if item["scope"] == "局域网" and row["scope"] != "局域网":
+                # 范围取更宽的；地址保留先出现的（一般是 IPv4，比 :: 好读）
+                row["scope"] = "局域网"
+                row["addr"] = item["addr"]
+        return sorted(merged.values(), key=lambda item: item["port"])
+
+    def systemd_services(self):
+        """运行中的 systemd 服务（带 TTL 缓存，避免频繁起子进程）。"""
+        with self._systemd_lock:
+            now = time.time()
+            if self._systemd is None or now - self._systemd_at > SYSTEMD_TTL:
+                self._systemd = self._collect_systemd()
+                self._systemd_at = now
+            return self._systemd
+
+    @staticmethod
+    def _collect_systemd(limit=80):
+        try:
+            done = subprocess.run(
+                ["systemctl", "list-units", "--type=service", "--state=running",
+                 "--no-pager", "--no-legend", "--plain"],
+                capture_output=True, text=True, timeout=5, check=False)
+        except FileNotFoundError:
+            return {"available": False, "reason": "没有 systemctl 命令"}
+        except subprocess.TimeoutExpired:
+            return {"available": False, "reason": "systemctl 调用超时"}
+        except OSError as exc:
+            return {"available": False, "reason": f"systemctl 调用失败：{exc}"}
+        if done.returncode != 0:
+            first = (done.stderr or "").strip().splitlines()
+            return {"available": False,
+                    "reason": first[0] if first else f"systemctl 返回码 {done.returncode}"}
+        rows = []
+        for line in done.stdout.splitlines():
+            fields = line.split(None, 4)
+            if len(fields) < 4 or not fields[0].endswith(".service"):
+                continue
+            rows.append({"unit": fields[0], "description": fields[4].strip() if len(fields) > 4 else ""})
+        rows.sort(key=lambda item: item["unit"])
+        return {"available": True, "total": len(rows), "list": rows[:limit]}
+
+    def services_detail(self):
+        """服务页需要的全部数据（容器 / systemd / 端口 / 远程探测结果）。"""
+        containers = []
+        rows, note = self._docker_containers(limit=100)
+        if note:
+            containers_note = note
+        else:
+            containers_note = None
+            containers = [{"name": row["name"], "up": row["status"] == "ok",
+                           "status": row["detail"], "image": row.get("image")} for row in rows]
+        targets, error, _mtime = self.probe_targets()
+        return {
+            "containers": {"list": containers, "note": containers_note,
+                           "total": self._container_total, "running": self._container_running},
+            "systemd": self.systemd_services(),
+            "ports": self.service_ports(),
+            "probes": {"list": self._probe.get("targets") or [], "error": error,
+                       "path": probes_path(), "interval": int(PROBE_TARGET_INTERVAL)},
+        }
+
     # ---------------- 服务状态（带 TTL 缓存，避免频繁起 docker 子进程） ----------------
 
     def services(self):
@@ -939,7 +1156,8 @@ class Collector:
         self._container_running = 0
         try:
             done = subprocess.run(
-                ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.ID}}"],
+                ["docker", "ps", "-a", "--format",
+                 "{{.Names}}\t{{.Status}}\t{{.ID}}\t{{.Image}}"],
                 capture_output=True, text=True, timeout=4, check=False,
             )
         except FileNotFoundError:
@@ -966,7 +1184,8 @@ class Collector:
                 names[container_id[:12]] = name
             rows.append({"group": "容器", "name": name,
                          "status": "ok" if status.lower().startswith("up") else "down",
-                         "detail": status})
+                         "detail": status,
+                         "image": parts[3].strip() if len(parts) > 3 else None})
         self._container_names = names   # 供进程页做「这个进程属于哪个容器」
         rows.sort(key=lambda row: (row["status"] != "ok", row["name"]))
         # 汇总用完整列表统计，展示则受 limit 限制

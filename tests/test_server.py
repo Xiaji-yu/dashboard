@@ -117,6 +117,7 @@ class HttpApiTest(unittest.TestCase):
             server.state["snapshot"] = snapshot
             server.state["processes"] = rows
             server.state["network"] = cls.collector.network_info()
+            server.state["services"] = cls.collector.services_detail()
             server.state["series_ts"] = snapshot["ts"]
             for key, value in server.series_values(snapshot).items():
                 server.state["history"].append(key, snapshot["ts"], value)
@@ -204,6 +205,21 @@ class HttpApiTest(unittest.TestCase):
         for key in ("pid", "name", "user", "cpu", "rss_mb", "status", "threads",
                     "started", "cmd", "container"):
             self.assertIn(key, first, key)
+
+    def test_services_contract(self):
+        status, ctype, body = self.request("/api/services")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", ctype)
+        payload = json.loads(body)
+        self.assertTrue(payload["ready"])
+        for key in ("containers", "systemd", "ports", "probes", "ts", "interval"):
+            self.assertIn(key, payload, key)
+        self.assertIn("path", payload["probes"])
+        self.assertIsInstance(payload["ports"], list)
+        if payload["ports"]:
+            row = payload["ports"][0]
+            for key in ("port", "proto", "addr", "scope", "process", "known"):
+                self.assertIn(key, row, key)
 
     def test_network_contract(self):
         status, ctype, body = self.request("/api/network")
