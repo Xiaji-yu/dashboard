@@ -15,8 +15,8 @@ from unittest import mock
 
 import psutil
 
-from collector import (Collector, battery_payload, is_virtual_nic, listen_ports,
-                       pick_nic, temp_entry_key)
+from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, is_virtual_nic,
+                       listen_ports, pick_nic, temp_entry_key)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -336,6 +336,28 @@ class PowerRaplTest(unittest.TestCase):
         result = self.collector._power(1001.0)
         self.assertFalse(result["available"])
         self.assertIn("预热", result["reason"])
+
+    def test_retries_after_cooldown(self):
+        """权限往往是事后才放开的：冷却结束后自动恢复，不必重启服务。"""
+        path = self.write_domain("package-0", 1000000, 0)
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o644)
+        first = self.collector._power(1000.0)
+        self.assertFalse(first["available"])
+        self.assertIn("root", first["reason"])
+
+        # 冷却期内不重复读 sysfs：即使权限已放开，也仍返回缓存的原因
+        os.chmod(path, 0o644)
+        during = self.collector._power(1000.0 + RAPL_RETRY_SECONDS / 2)
+        self.assertFalse(during["available"])
+        self.assertIn("root", during["reason"])
+
+        # 冷却结束：重新读到基准，下一次给出瓦数
+        self.collector._power(1000.0 + RAPL_RETRY_SECONDS + 1)
+        self.write_domain("package-0", 3000000, 0)
+        result = self.collector._power(1000.0 + RAPL_RETRY_SECONDS + 2)
+        self.assertTrue(result["available"])
+        self.assertAlmostEqual(result["watts"], 2.0, places=3)
 
 
 class DegradationTest(unittest.TestCase):

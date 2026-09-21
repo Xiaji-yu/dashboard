@@ -81,11 +81,15 @@ systemctl status dashboard
 2. **udev 规则（备选）**：`deploy/60-dashboard-rapl.rules`，装好后每次设备出现都会放开读权限：
 
    ```bash
-   sudo cp deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
-   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=powercap
+   sudo cp /home/xiaji/code/dashboard/deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
+   sudo udevadm control --reload-rules
+   sudo udevadm trigger --action=add --subsystem-match=powercap
    ```
 
+   注意 `trigger` 要带 `--action=add`（默认动作是 `change`，不会触发只匹配 `add` 的规则）。
    验证（普通用户，能打印数字即可）：`cat /sys/class/powercap/intel-rapl:0/energy_uj`
+
+   权限放开后**不用重启看板**：采集层每 60 秒会重试一次读取。
 
 **不建议把看板本身跑成 root**：服务监听 `0.0.0.0` 且无鉴权，一旦被访问就能拿到 root 进程的
 全部能力。上面两种方式都只把「读功耗计数器」这一件事放开。

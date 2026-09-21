@@ -31,6 +31,9 @@ RAPL_LABELS = {
     "dram": "内存",
 }
 SERVICES_TTL = 5.0
+# RAPL 读取失败后的冷却时间：期间直接返回缓存的原因；
+# 过了冷却就再试一次——权限往往是事后才放开的，不该逼着用户重启服务。
+RAPL_RETRY_SECONDS = 60.0
 GIB = 1024.0 ** 3
 MIB = 1024.0 ** 2
 
@@ -148,6 +151,7 @@ class Collector:
         self._net_prev = None
         self._rapl_prev = {}
         self._rapl_note = None
+        self._rapl_note_at = 0.0
         self._rapl_domains = None
         self._procs = {}
         self._services = None
@@ -332,6 +336,12 @@ class Collector:
         self._rapl_domains = domains
         return domains
 
+    def _rapl_fail(self, now, reason):
+        """记住失败原因（冷却期内不重复读 sysfs），保证返回结构一致。"""
+        self._rapl_note = reason
+        self._rapl_note_at = now
+        return {"available": False, "reason": reason}
+
     def _power(self, now):
         """功耗：逐域读取 RAPL 累计能量做差分。
 
@@ -339,11 +349,13 @@ class Collector:
         供性能页画参考图那样的功耗构成。
         """
         if self._rapl_note:
-            return {"available": False, "reason": self._rapl_note}
+            if now - self._rapl_note_at < RAPL_RETRY_SECONDS:
+                return {"available": False, "reason": self._rapl_note}
+            self._rapl_note = None      # 冷却结束，重试（权限可能是后来才放开的）
+            self._rapl_domains = None   # 域目录内容也可能变了，重新枚举
         domains = self._rapl_paths()
         if not domains:
-            self._rapl_note = "本机没有 Intel RAPL 功耗计数器"
-            return {"available": False, "reason": self._rapl_note}
+            return self._rapl_fail(now, "本机没有 Intel RAPL 功耗计数器")
 
         readings = {}
         for name, path in domains:
@@ -351,15 +363,13 @@ class Collector:
                 with open(path, "r") as handle:
                     readings[name] = int(handle.read().strip())
             except PermissionError:
-                self._rapl_note = ("读取 RAPL 需要权限：以 root 运行，"
-                                   "或用 deploy 里的 udev 规则放开 energy_uj 读权限")
-                return {"available": False, "reason": self._rapl_note}
+                return self._rapl_fail(
+                    now, "读取 RAPL 需要权限：以 root 运行，"
+                         "或用 deploy 里的 udev 规则放开 energy_uj 读权限")
             except FileNotFoundError:
-                self._rapl_note = "RAPL 计数器不可读"
-                return {"available": False, "reason": self._rapl_note}
+                return self._rapl_fail(now, "RAPL 计数器不可读")
             except (OSError, ValueError) as exc:
-                self._rapl_note = f"RAPL 读取失败：{exc}"
-                return {"available": False, "reason": self._rapl_note}
+                return self._rapl_fail(now, f"RAPL 读取失败：{exc}")
 
         watts = {}
         for name, energy in readings.items():
