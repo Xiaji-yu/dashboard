@@ -20,8 +20,10 @@ import psutil
 import collector as collector_module
 from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, container_id_from_cgroup,
                        format_khz, format_sockaddr, is_virtual_nic, is_wireless_nic, listen_ports,
-                       listen_sockets, parse_cpu_flags, parse_cpu_model, parse_default_gateway,
-                       parse_os_release, pick_nic, temp_entry_key, virtualization_label)
+                       listen_sockets, load_oui, oui_vendor, parse_arp_table, parse_cpu_flags,
+                       parse_cpu_model, parse_default_gateway, parse_os_release,
+                       parse_ssdp_response, pick_nic, subnet_candidates, subnet_label,
+                       temp_entry_key, virtualization_label)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -583,7 +585,7 @@ class DeviceInfoTest(unittest.TestCase):
 
     def test_device_info_structure(self):
         info = Collector().device_info()
-        for key in ("summary", "usb", "bluetooth", "interfaces", "pci", "runtime"):
+        for key in ("summary", "usb", "bluetooth", "interfaces", "lan", "runtime"):
             self.assertIn(key, info, key)
         summary = info["summary"]
         self.assertEqual(summary["hostname"], socket.gethostname())
@@ -598,9 +600,11 @@ class DeviceInfoTest(unittest.TestCase):
         self.assertLessEqual(info["usb"]["external"], info["usb"]["total"])
         # 网络：至少回环
         self.assertTrue(info["interfaces"]["physical"])
-        # PCI：有 lspci 时应当有内容
-        if info["pci"]["available"]:
-            self.assertTrue(info["pci"]["list"])
+        # 局域网：结构齐全（本机可能一个邻居都没有）
+        self.assertIn("hosts", info["lan"])
+        self.assertIn("subnet", info["lan"])
+        self.assertIsInstance(info["lan"]["hosts"], list)
+        self.assertNotIn("pci", info, "PCI 已按需求移除")
         self.assertTrue(info["runtime"]["python"])
 
     def test_interface_kind(self):
@@ -654,19 +658,84 @@ class DeviceInfoTest(unittest.TestCase):
         self.assertEqual(info["signal_dbm"], -55.0)
         self.assertEqual(info["quality"], 55.0)
 
-    def test_pci_devices_parsing(self):
-        output = ("00:02.0 VGA compatible controller: Intel Corporation HD Graphics 620 (rev 02)\n"
-                  "00:14.0 USB controller: Intel Corporation Sunrise Point-LP USB 3.0 xHCI Controller\n")
-        done = mock.Mock(returncode=0, stdout=output, stderr="")
-        with mock.patch("collector.subprocess.run", return_value=done):
-            result = Collector._pci_devices()
-        self.assertTrue(result["available"])
-        self.assertEqual(result["total"], 2)
-        self.assertTrue(result["list"][0].startswith("00:02.0 VGA"))
-        with mock.patch("collector.subprocess.run", side_effect=FileNotFoundError):
-            missing = Collector._pci_devices()
-        self.assertFalse(missing["available"])
-        self.assertIn("lspci", missing["reason"])
+    def test_subnet_candidates(self):
+        hosts = subnet_candidates("192.168.1.111", "255.255.255.0")
+        self.assertEqual(len(hosts), 253, "整段 /24 去掉网络地址、广播地址与本机")
+        self.assertNotIn("192.168.1.111", hosts)
+        self.assertNotIn("192.168.1.0", hosts)
+        self.assertNotIn("192.168.1.255", hosts)
+        self.assertIn("192.168.1.1", hosts)
+        # 网段比 /24 大时收敛到本机所在 /24
+        big = subnet_candidates("10.1.2.3", "255.255.0.0")
+        self.assertEqual(len(big), 253)
+        self.assertTrue(all(item.startswith("10.1.2.") for item in big))
+        self.assertNotIn("10.1.2.3", big)
+        # 异常输入不该炸
+        self.assertEqual(subnet_candidates(None, None), [])
+        self.assertEqual(subnet_candidates("1.2.3", "255.255.255.0"), [])
+        self.assertEqual(subnet_candidates("1.2.3.4", "x"), [])
+
+    def test_subnet_label(self):
+        self.assertEqual(subnet_label("192.168.1.111", "255.255.255.0"), "192.168.1.0/24")
+        self.assertEqual(subnet_label("10.1.2.3", "255.255.0.0"), "10.1.0.0/16")
+        self.assertIsNone(subnet_label("bad", "255.255.255.0"))
+        self.assertIsNone(subnet_label(None, None))
+
+    def test_parse_arp_table(self):
+        text = ("IP address       HW type     Flags       HW address            Mask     Device\n"
+                "192.168.1.2      0x1         0x2         5a:42:70:53:b0:5c     *        enx0\n"
+                "192.168.1.236    0x1         0x0         00:00:00:00:00:00     *        enx0\n"
+                "172.24.0.2       0x1         0x2         5E:B7:8D:07:F7:E1     *        br-1\n")
+        rows = parse_arp_table(text)
+        self.assertEqual(rows["192.168.1.2"], "5a:42:70:53:b0:5c")
+        self.assertNotIn("192.168.1.236", rows, "全零 MAC 的失败条目要跳过")
+        self.assertEqual(rows["172.24.0.2"], "5e:b7:8d:07:f7:e1")
+        self.assertEqual(parse_arp_table(""), {})
+
+    def test_parse_ssdp_response(self):
+        text = ("HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\n"
+                "SERVER: Linux/3.14 UPnP/1.0 MiniUPnPd/2.2\r\n"
+                "LOCATION: http://192.168.1.2:1900/rootDesc.xml\r\n"
+                "ST: upnp:rootdevice\r\nUSN: uuid:x::upnp:rootdevice\r\n\r\n")
+        info = parse_ssdp_response(text)
+        self.assertIn("MiniUPnPd", info["server"])
+        self.assertEqual(info["location"], "http://192.168.1.2:1900/rootDesc.xml")
+        self.assertEqual(info["st"], "upnp:rootdevice")
+        self.assertIsNone(parse_ssdp_response("not a response"))
+
+    def test_oui_vendor(self):
+        table = {"00:0E:C6": "ASIX ELECTRONICS CORP."}
+        self.assertEqual(oui_vendor("00:0e:c6:c8:7f:b8", table), "ASIX ELECTRONICS CORP.")
+        self.assertIsNone(oui_vendor("aa:bb:cc:dd:ee:ff", table))
+        self.assertIsNone(oui_vendor("00:00:00:00:00:00", table))
+        self.assertIsNone(oui_vendor(None, table))
+
+    def test_load_oui_from_system(self):
+        table = load_oui()
+        self.assertIsInstance(table, dict)
+        for key in list(table)[:5]:
+            self.assertEqual(len(key), 8, "键是 AA:BB:CC 形式")
+
+    def test_lan_devices_structure(self):
+        """没有扫描缓存时也能给出结构：邻居表里的条目 + 网段信息。"""
+        collector = Collector()
+        result = collector.lan_devices()
+        for key in ("hosts", "subnet", "swept", "live", "oui"):
+            self.assertIn(key, result, key)
+        self.assertIsInstance(result["hosts"], list)
+        subnet = collector._local_subnet()
+        if subnet and result["hosts"]:
+            for host in result["hosts"]:
+                self.assertTrue(host["ip"].startswith(subnet["prefix"]),
+                                "docker 网桥的条目不该混进局域网设备")
+                self.assertIn("sources", host)
+
+    def test_reverse_dns_strips_lan_suffix(self):
+        collector = Collector.__new__(Collector)
+        with mock.patch("socket.gethostbyaddr", return_value=("Xiaomi-14-Pro.lan", [], ["1"])):
+            self.assertEqual(collector._reverse_dns("192.168.1.236"), "Xiaomi-14-Pro")
+        with mock.patch("socket.gethostbyaddr", side_effect=socket.herror):
+            self.assertIsNone(collector._reverse_dns("192.168.1.236"))
 
     def test_bluetooth_without_adapter(self):
         collector = Collector.__new__(Collector)

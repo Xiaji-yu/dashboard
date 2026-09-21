@@ -34,9 +34,13 @@
         '<div class="card-body"><div class="list-rows" id="dev-if"></div></div>' +
       '</div>' +
       '<div class="card">' +
-        '<div class="card-head"><span>PCI 设备</span>' +
-        '<span class="head-note" id="dev-pci-note">—</span></div>' +
-        '<div class="card-body"><div class="list-rows" id="dev-pci"></div></div>' +
+        '<div class="card-head"><span>局域网设备</span>' +
+        '<span class="head-note" id="dev-lan-note">—</span></div>' +
+        '<div class="card-body">' +
+          '<div class="svc-tip">免凭据发现：邻居表（ARP）+ ICMP 探测 + SSDP 组播查询，' +
+            '不需要其他设备的账号密码。想看路由器自己的完整客户端列表，才需要路由器管理密码。</div>' +
+          '<div class="list-rows" id="dev-lan"></div>' +
+        '</div>' +
       '</div>';
 
     host.appendChild(summary);
@@ -176,23 +180,33 @@
     host.innerHTML = rows.join('');
   }
 
-  function renderPci(pci) {
-    var host = document.getElementById('dev-pci');
-    var note = document.getElementById('dev-pci-note');
-    if (!pci || !pci.available) {
-      note.textContent = '不可用';
-      host.innerHTML = '<div class="empty">' + esc((pci && pci.reason) || '读不到 PCI 设备') + '</div>';
+  function renderLan(lan) {
+    var host = document.getElementById('dev-lan');
+    var note = document.getElementById('dev-lan-note');
+    if (!lan || !lan.hosts || !lan.hosts.length) {
+      note.textContent = lan && lan.subnet ? lan.subnet : '—';
+      host.innerHTML = '<div class="empty">' +
+        esc((lan && lan.note) || '这个网段暂时没发现其他设备') + '</div>';
       return;
     }
-    note.textContent = pci.total + ' 个';
-    host.innerHTML = pci.list.map(function (line) {
-      var parts = line.split(' ');
-      var slot = parts.shift();
-      return '<div class="pci-row">' +
-        '<span class="pci-slot">' + esc(slot) + '</span>' +
-        '<span class="pci-name">' + esc(parts.join(' ')) + '</span>' +
+    note.textContent = lan.hosts.length + ' 台 · ' + (lan.subnet || '') +
+      (lan.scanned_at ? ' · 每 ' + Math.round(120) + ' 秒重扫' : '');
+    host.innerHTML = lan.hosts.map(function (item) {
+      var alive = item.alive === true;
+      var tags = (item.sources || []).map(function (source) {
+        return '<span class="lan-tag ' + esc(source) + '">' +
+          ({ icmp: 'ICMP', arp: 'ARP', ssdp: 'SSDP' }[source] || esc(source)) + '</span>';
+      }).join('');
+      var name = item.name || item.vendor || '';
+      return '<div class="lan-row">' +
+        '<span class="lan-state ' + (alive ? 'up' : 'unknown') + '">' +
+          (alive ? '在线' : '邻居') + '</span>' +
+        '<span class="lan-ip">' + esc(item.ip) + '</span>' +
+        '<span class="lan-name">' + esc(name) + '</span>' +
+        '<span class="lan-mac">' + esc(item.mac || '—') + '</span>' +
+        '<span class="lan-tags">' + tags + '</span>' +
         '</div>';
-    }).join('');
+    }).join('') + (lan.note ? '<div class="svc-tip">' + esc(lan.note) + '</div>' : '');
   }
 
   function render(payload) {
@@ -200,7 +214,7 @@
     renderUsb(payload.usb || {});
     renderBluetooth(payload.bluetooth || {});
     renderInterfaces(payload.interfaces || {});
-    renderPci(payload.pci || {});
+    renderLan(payload.lan || {});
     var battery = payload.battery;
     if (battery) {
       document.getElementById('dev-summary').insertAdjacentHTML('beforeend',

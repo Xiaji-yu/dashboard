@@ -492,6 +492,8 @@ def main():
     threading.Thread(target=sampler, args=(collector,), daemon=True).start()
     # 延迟探测单独一个线程：连接超时不该拖慢 1 秒采样
     threading.Thread(target=collector.probe_loop, daemon=True).start()
+    # 局域网扫描也放后台：整段 ping 要十来秒，不能占着请求线程
+    threading.Thread(target=collector.lan_scan_loop, daemon=True).start()
 
     try:
         httpd = create_server(collector, HOST, PORT, auth=auth_store)

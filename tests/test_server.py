@@ -250,7 +250,7 @@ class HttpApiTest(unittest.TestCase):
         self.assertIn("application/json", ctype)
         payload = json.loads(body)
         self.assertTrue(payload["ready"])
-        for key in ("summary", "usb", "bluetooth", "interfaces", "pci", "runtime"):
+        for key in ("summary", "usb", "bluetooth", "interfaces", "lan", "runtime"):
             self.assertIn(key, payload, key)
         self.assertTrue(payload["summary"]["hostname"])
         self.assertIn("list", payload["usb"])

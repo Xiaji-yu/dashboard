@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import platform
@@ -63,12 +64,127 @@ PROBE_TARGET_TIMEOUT = 1.5
 SYSTEMD_TTL = 10.0
 # 设备信息（基本不变）的缓存时间；里面要起一次 docker --version
 DEVICE_TTL = 60.0
+# 局域网扫描：整段 /24 并发 ping 约 10 秒，放后台线程每 2 分钟跑一次
+LAN_SWEEP_INTERVAL = 120.0
+LAN_MAX_HOSTS = 256
+LAN_PING_WORKERS = 32
+LAN_SSDP_WINDOW = 2.5
+# IEEE OUI 厂商库（发行版可能放在这几个位置）
+OUI_PATHS = ("/usr/share/ieee-data/oui.txt", "/var/lib/ieee-data/oui.txt",
+             "/usr/share/misc/oui.txt")
+_oui_cache = None
 
 # 常见代理端口（「本地代理」一行用；8080 太通用，刻意不算）
 PROXY_PORTS = (7890, 7891, 1080, 1081, 8118, 3128, 8889, 7897)
 # 延迟探测：网关试这几个端口取最快的一个；外网目标可用环境变量改
 GATEWAY_PROBE_PORTS = (53, 22, 443, 80)
 NET_PROBE_TARGET = os.environ.get("DASHBOARD_NET_TARGET", "www.baidu.com:443")
+
+
+def subnet_candidates(ip, netmask, cap=LAN_MAX_HOSTS):
+    """本网段内可扫描的地址：跳过网络地址、广播地址与本机，最多 cap 个。
+
+    网段比 /24 大时只扫本机所在的 /24，避免一次扫几万个地址。
+    """
+    try:
+        ip_parts = [int(part) for part in str(ip).split(".")]
+        mask_parts = [int(part) for part in str(netmask).split(".")]
+    except (AttributeError, ValueError):
+        return []
+    if len(ip_parts) != 4 or len(mask_parts) != 4:
+        return []
+
+    def pack(parts):
+        value = 0
+        for part in parts:
+            value = (value << 8) | part
+        return value
+
+    ip_value, mask_value = pack(ip_parts), pack(mask_parts)
+    network = ip_value & mask_value
+    broadcast = network | (~mask_value & 0xFFFFFFFF)
+    if broadcast - network - 1 > cap:
+        mask_value = 0xFFFFFF00
+        network = ip_value & mask_value
+        broadcast = network | 0xFF
+    hosts = []
+    for value in range(network + 1, broadcast):
+        if value == ip_value:
+            continue
+        hosts.append(".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0)))
+        if len(hosts) >= cap:
+            break
+    return hosts
+
+
+def subnet_label(ip, netmask):
+    """网段的展示写法，例如 192.168.1.0/24。"""
+    try:
+        parts = [int(part) for part in str(ip).split(".")]
+        mask = [int(part) for part in str(netmask).split(".")]
+    except (AttributeError, ValueError):
+        return None
+    if len(parts) != 4 or len(mask) != 4:
+        return None
+    network = [parts[i] & mask[i] for i in range(4)]
+    prefix = sum(bin(part).count("1") for part in mask)
+    return ".".join(str(part) for part in network) + f"/{prefix}"
+
+
+def parse_arp_table(text):
+    """解析 /proc/net/arp：{ip: mac}，跳过全零条目。"""
+    rows = {}
+    for line in (text or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        ip, mac = fields[0], fields[3]
+        if mac and mac != "00:00:00:00:00:00":
+            rows[ip] = mac.lower()
+    return rows
+
+
+def parse_ssdp_response(text):
+    """从 SSDP 响应里取 SERVER / LOCATION / USN / ST。"""
+    info = {}
+    for line in (text or "").splitlines()[1:]:
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        if key in ("server", "location", "usn", "st") and value.strip():
+            info[key] = value.strip()
+    return info or None
+
+
+def load_oui():
+    """IEEE OUI 库：MAC 前缀 -> 厂商名。读一次缓存；机器上没有库就返回空表。"""
+    global _oui_cache
+    if _oui_cache is not None:
+        return _oui_cache
+    table = {}
+    for path in OUI_PATHS:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if "(hex)" not in line:
+                        continue
+                    prefix, _, vendor = line.partition("(hex)")
+                    key = prefix.strip().replace("-", ":").upper()
+                    if len(key) == 8 and ":" in key and vendor.strip():
+                        table.setdefault(key, vendor.strip())
+        except OSError:
+            continue
+        if table:
+            break
+    _oui_cache = table
+    return table
+
+
+def oui_vendor(mac, table=None):
+    """MAC -> 厂商名；查不到（或库缺失）返回 None。"""
+    if not mac or mac == "00:00:00:00:00:00":
+        return None
+    table = load_oui() if table is None else table
+    return table.get(mac.upper()[:8])
 
 
 def parse_os_release(text):
@@ -329,6 +445,7 @@ class Collector:
         self._device = None
         self._device_at = 0.0
         self._device_lock = threading.Lock()
+        self._lan_cache = ({}, 0.0)
         self._gateway = self._read_gateway()
         self._probe = {"gateway_ms": None, "internet_ms": None,
                        "internet_target": NET_PROBE_TARGET, "at": 0.0}
@@ -1232,18 +1349,177 @@ class Collector:
             (virtual if kind == "虚拟" else physical).append(info)
         return {"physical": physical, "virtual": virtual}
 
+    # ---------------- 局域网设备（免凭据发现） ----------------
+
+    def _local_subnet(self):
+        """本机物理网卡所在网段：返回 (ip, netmask, 前缀, 展示用标签)。"""
+        if not self.nic:
+            return None
+        for addr in psutil.net_if_addrs().get(self.nic, []):
+            if addr.family != socket.AF_INET or not addr.netmask:
+                continue
+            ip, netmask = addr.address, addr.netmask
+            label = subnet_label(ip, netmask)
+            if not label:
+                continue
+            return {"ip": ip, "netmask": netmask, "label": label,
+                    "prefix": ip.rsplit(".", 1)[0] + "."}
+        return None
+
     @staticmethod
-    def _pci_devices(limit=60):
-        """PCI 设备：lspci 给可读名字（本机 15 个），没有它就只能缺省。"""
+    def _reverse_dns(ip):
+        """反向解析主机名（本网段通常由路由器 DNS 提供，例如 Xiaomi-14-Pro.lan）。"""
         try:
-            done = subprocess.run(["lspci"], capture_output=True, text=True,
-                                  timeout=5, check=False)
+            name = socket.gethostbyaddr(ip)[0]
+        except (OSError, socket.herror):
+            return None
+        if not name:
+            return None
+        return name[:-4] if name.endswith(".lan") else name
+
+    @staticmethod
+    def _ping(ip):
+        """单次 ICMP 探测（ping 有权限时可用；不可用就退化为只看 ARP 表）。"""
+        try:
+            done = subprocess.run(["ping", "-c", "1", "-W", "1", "-n", ip],
+                                  capture_output=True, timeout=3)
         except FileNotFoundError:
-            return {"available": False, "reason": "没有 lspci 命令", "list": []}
-        except (OSError, subprocess.SubprocessError) as exc:
-            return {"available": False, "reason": f"lspci 调用失败：{exc}", "list": []}
-        rows = [line.strip() for line in (done.stdout or "").splitlines() if line.strip()]
-        return {"available": True, "reason": None, "total": len(rows), "list": rows[:limit]}
+            raise
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return ip if done.returncode == 0 else None
+
+    def _ping_sweep(self, hosts):
+        """并发 ping 整段网段；ping 不可用时抛出 FileNotFoundError 由上层降级。"""
+        live = []
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=LAN_PING_WORKERS) as pool:
+            for result in pool.map(self._ping, hosts):
+                if result:
+                    live.append(result)
+        return live
+
+    @staticmethod
+    def _ssdp_scan(window=LAN_SSDP_WINDOW):
+        """SSDP/UPnP 组播查询：路由器、NAS、电视、打印机等通常会回应。"""
+        found = {}
+        message = (b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+                   b'MAN: "ssdp:discover"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n')
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            sock.settimeout(0.6)
+        except OSError:
+            return found
+        try:
+            for _ in range(2):
+                try:
+                    sock.sendto(message, ("239.255.255.250", 1900))
+                except OSError:
+                    break
+            deadline = time.time() + window
+            while time.time() < deadline:
+                try:
+                    data, addr = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                info = parse_ssdp_response(data.decode("utf-8", "replace"))
+                if info and addr[0] not in found:
+                    found[addr[0]] = info
+        finally:
+            sock.close()
+        return found
+
+    def _lan_scan(self):
+        """主动扫描：ping 整段 + SSDP 查询 + 反向 DNS，随后从 ARP 表取 MAC。"""
+        started = time.time()
+        subnet = self._local_subnet()
+        if not subnet:
+            return {"hosts": [], "subnet": None, "swept": 0, "live": 0,
+                    "note": "没有找到可用的物理网卡，无法判断网段"}
+        hosts = subnet_candidates(subnet["ip"], subnet["netmask"])
+        note = None
+        live = []
+        try:
+            live = self._ping_sweep(hosts)
+        except FileNotFoundError:
+            note = "本机没有 ping 命令，只能看邻居表里出现过的设备"
+        except Exception as exc:                      # 扫描失败不该影响页面
+            note = f"ICMP 探测失败：{exc}"
+        ssdp = self._ssdp_scan()
+        arp = parse_arp_table(self._read_sys("/proc/net/arp"))
+        rows = []
+        for ip in sorted(set(live) | {item for item in ssdp if item.startswith(subnet["prefix"])},
+                         key=lambda text: [int(part) for part in text.split(".")]):
+            sources = ["icmp"] if ip in live else []
+            if ip in ssdp:
+                sources.append("ssdp")
+            rows.append({"ip": ip, "alive": ip in live, "name": self._reverse_dns(ip),
+                         "mac": arp.get(ip), "sources": sources,
+                         "ssdp": ssdp.get(ip, {}).get("server"),
+                         "location": ssdp.get(ip, {}).get("location")})
+        return {"hosts": rows, "subnet": subnet["label"], "swept": len(hosts),
+                "live": len(live), "note": note,
+                "duration_s": round(time.time() - started, 1)}
+
+    def lan_scan_loop(self):
+        """后台线程：周期性扫描局域网（主动扫描不该拖慢采样与请求）。"""
+        while True:
+            started = time.time()
+            try:
+                result = self._lan_scan()
+                self._lan_cache = (result, time.time())
+            except Exception as exc:
+                print(f"[lan] 扫描失败：{exc}", flush=True)
+            time.sleep(max(5.0, LAN_SWEEP_INTERVAL - (time.time() - started)))
+
+    def lan_devices(self):
+        """局域网设备：主动扫描结果（缓存）+ 实时邻居表，补上厂商与名称。
+
+        全程不需要任何设备的账号密码：邻居表/ARP 是内核维护的，
+        ICMP 与 SSDP 组播只是「问一声」；只有想看路由器自己的客户端列表才需要路由器管理口令。
+        """
+        cache, scanned_at = self._lan_cache
+        subnet = self._local_subnet()
+        prefix = subnet["prefix"] if subnet else None
+        arp = parse_arp_table(self._read_sys("/proc/net/arp"))
+        table = load_oui()
+        devices = {}
+
+        for host in cache.get("hosts", []):
+            devices[host["ip"]] = {
+                "ip": host["ip"], "alive": host.get("alive"), "name": host.get("name"),
+                "mac": host.get("mac"), "sources": list(host.get("sources") or []),
+                "ssdp": host.get("ssdp"),
+            }
+        for ip, mac in arp.items():
+            if prefix and not ip.startswith(prefix):
+                continue                                  # docker 网桥那些不算局域网设备
+            entry = devices.setdefault(ip, {"ip": ip, "alive": None, "name": None,
+                                            "sources": []})
+            entry["mac"] = mac
+            if "arp" not in entry["sources"]:
+                entry["sources"].append("arp")
+            if entry.get("name") is None and not cache.get("hosts"):
+                entry["name"] = self._reverse_dns(ip)
+        for entry in devices.values():
+            entry["vendor"] = oui_vendor(entry.get("mac"), table)
+        hosts = sorted(devices.values(),
+                       key=lambda item: [int(part) for part in item["ip"].split(".")
+                                         if part.isdigit()] or [0])
+        return {
+            "hosts": hosts,
+            "subnet": (cache.get("subnet") or (subnet or {}).get("label")),
+            "scanned_at": scanned_at or None,
+            "scan_seconds": cache.get("duration_s"),
+            "swept": cache.get("swept", 0),
+            "live": cache.get("live", 0),
+            "note": cache.get("note"),
+            "oui": bool(table),
+        }
 
     def _collect_device(self):
         """设备页：本机摘要 + 与这台机器连接的设备（USB / 蓝牙 / 网络 / PCI）。"""
@@ -1282,7 +1558,7 @@ class Collector:
                     "external": sum(1 for item in usb if not item["hub"])},
             "bluetooth": self._bluetooth(),
             "interfaces": self._interfaces(),
-            "pci": self._pci_devices(),
+            "lan": self.lan_devices(),
             "battery": battery if battery.get("available") else None,
             "runtime": {
                 "python": platform.python_version(),

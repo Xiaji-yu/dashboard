@@ -1310,25 +1310,42 @@ body {
   white-space: nowrap;
 }
 
-/* PCI */
-.pci-row {
-  display: flex;
-  gap: 10px;
-  padding: 4px 0;
+/* 局域网设备 */
+.lan-row {
+  display: grid;
+  grid-template-columns: 46px 108px minmax(0, 1.3fr) 132px 62px;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 0;
   border-bottom: 1px dashed var(--line-soft);
   font-size: 12px;
 }
 
-.pci-slot { flex: 0 0 66px; color: var(--dim); font-variant-numeric: tabular-nums; }
-
-.pci-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.lan-state {
+  font-size: 10.5px;
+  text-align: center;
+  border-radius: 5px;
+  padding: 1px 0;
+  color: var(--green);
+  background: rgba(61, 220, 151, 0.14);
 }
+
+.lan-state.unknown { color: var(--dim); background: rgba(255, 255, 255, 0.05); }
+.lan-ip { font-variant-numeric: tabular-nums; }
+.lan-name { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lan-mac { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.lan-tags { display: flex; gap: 3px; justify-content: flex-end; }
+
+.lan-tag {
+  font-size: 10px;
+  color: var(--dim);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.lan-tag.icmp { color: var(--green); background: rgba(61, 220, 151, 0.12); }
+.lan-tag.ssdp { color: var(--blue); background: rgba(79, 195, 247, 0.12); }
 
 .empty .dim { color: var(--dim); }
 
@@ -1339,6 +1356,8 @@ body {
   .usb-vendor, .usb-port { display: none; }
   .iface-row { grid-template-columns: 46px minmax(0, 1fr) 54px; }
   .iface-detail { display: none; }
+  .lan-row { grid-template-columns: 44px 104px minmax(0, 1fr); }
+  .lan-mac, .lan-tags { display: none; }
 }
 
 @media (min-width: 901px) and (max-height: 730px) {
