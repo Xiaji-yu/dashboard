@@ -530,7 +530,7 @@ body {
   /* 大卡的曲线区靠 height:100% 撑开，父容器必须有确定高度；
      桌面端父容器是自然高度，所以这里用视口高度作参照（手机端另有固定高度）。
      46vh：比原先的 58vh 矮一些，好和下面三张卡一起放进一屏，又不至于让卡片拉伸留出大片空白。 */
-  .perf-top { flex: 0 1 auto; height: 46vh; min-height: 300px; }
+  .perf-top { flex: 0 1 auto; height: 46vh; min-height: 200px; }
 
   /* 性能页也做成一屏：三张卡吃掉剩余高度，内容超出时卡片内部滚动 */
   body[data-page="performance"] .app {
@@ -614,6 +614,7 @@ body {
 .side-note b { color: var(--text); font-weight: 400; font-variant-numeric: tabular-nums; }
 .side-note .dim { color: var(--dim); }
 .side-note.dim { color: var(--dim); font-size: 11.5px; }
+.side-note { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-note.push-bottom { margin-top: auto; }
 
 /* 按物理核分组的占用条（对应参考图的「能效核心 / 性能核心」两组） */
@@ -921,7 +922,7 @@ body {
   }
 
   /* 网速卡高度是性能页大卡的一半 */
-  .net-top { height: 29vh; min-height: 190px; }
+  .net-top { height: 29vh; min-height: 160px; }
 
   /* 下面三张卡吃掉剩余空间，内容超了就卡片内部滚动，不撑破一屏 */
   .net-bottom { flex: 1 1 auto; min-height: 0; }
@@ -949,3 +950,56 @@ body {
 .perf-bottom .card-body { display: flex; flex-direction: column; }
 .perf-bottom .mini-chart { flex: 1 1 auto; min-height: 46px; }
 .perf-bottom .card:nth-child(3) .card-body { justify-content: space-between; }
+
+/* ---------------- 矮视口横屏紧凑模式（平板横屏带浏览器工具栏、小笔记本） ----------------
+   目标是「一屏显示全部、卡片不被压出滚动条」，所以在保留一屏的前提下收紧尺寸。 */
+@media (min-width: 901px) and (max-height: 730px) {
+  .main { padding: 10px 12px 12px; gap: 10px; }
+
+  /* 侧栏（品牌 + 7 个页签 + 页脚）在矮视口里自己会超出，允许它收缩并内部滚动 */
+  .sidebar { min-height: 0; overflow-y: auto; }
+
+  /* 左列变窄后省掉 GPU 量程后缀，避免折行 */
+  .perf-top-left #s-gpu { display: none; }
+
+  .perf-top { height: 38vh; min-height: 190px; padding: 12px 14px 8px; }
+  .net-top { height: 22vh; min-height: 140px; padding: 12px 14px 8px; }
+  .perf-top-left { flex: 0 0 210px; gap: 8px; }
+  .big-value { font-size: 28px; }
+  .net-block .big-value { font-size: 22px; }
+  .core-groups { gap: 7px; }
+  .core-bars i { height: 6px; }
+
+  .card-head { padding: 8px 12px 6px; }
+  .card-body { padding: 0 12px 8px; }
+  .kv-row, .proc-row, .core-row { font-size: 11.5px; }
+  .kv-rows { gap: 2px; margin-top: 6px; }
+  .mini-chart { height: 34px; margin-top: 6px; }
+  .disk-chart { height: 84px; margin: 2px 0 6px; }
+  .mem-stack { margin: 6px 0 8px; }
+  .mem-legend { gap: 3px 12px; font-size: 11.5px; }
+  .temp-cell .big-value { font-size: 24px; }
+  .mount-rows { padding-top: 6px; }
+}
+
+/* 更矮的横屏（竖屏手机横过来、超矮窗口）：再收紧一档，保证不裁切、不需要卡片内滚动 */
+@media (min-width: 901px) and (max-height: 500px) {
+  .main { padding: 8px 10px 10px; gap: 8px; }
+  .perf-top { height: 32vh; min-height: 140px; padding: 10px 12px 6px; }
+  .net-top { height: 18vh; min-height: 110px; padding: 10px 12px 6px; }
+  .big-value { font-size: 24px; }
+  .net-block .big-value { font-size: 20px; }
+  .net-block { margin-bottom: 2px; }
+  .core-groups { gap: 5px; }
+  .mini-chart { height: 26px; margin-top: 4px; }
+  .disk-chart { height: 60px; margin: 2px 0 4px; }
+  .card-head { padding: 6px 10px 4px; }
+  .card-body { padding: 0 10px 6px; }
+  .kv-row { font-size: 11px; }
+  .kv-rows { gap: 1px; margin-top: 4px; }
+  .temp-extra { font-size: 11px; margin-top: 4px; }
+  .mount-rows { padding-top: 4px; }
+  /* 极端矮屏（如手机横屏）下省略左列次要的一行，避免撑出卡片 */
+  .perf-top-left .side-note.dim { display: none; }
+  .perf-top-left { flex: 0 0 180px; }
+}
