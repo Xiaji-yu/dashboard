@@ -758,3 +758,144 @@ body {
   .temp-pair { gap: 14px; }
   .kv-row { font-size: 11.5px; }
 }
+
+/* ---------------- 进程页 ---------------- */
+/* 这一页要「卡片填满视口 + 表头常驻 + 行区内部滚动」，所以覆盖非概览页整页滚动的默认规则 */
+
+@media (min-width: 901px) {
+  body[data-page="processes"] .app {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+}
+
+.proc-card {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 6px;
+}
+
+.proc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 18px 10px;
+}
+
+.proc-search {
+  flex: 0 1 320px;
+  min-width: 0;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+}
+
+.proc-search:focus { border-color: rgba(61, 220, 151, 0.45); }
+.proc-search::placeholder { color: var(--dim); }
+.proc-hint { font-size: 11.5px; color: var(--dim); }
+
+.proc-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 18px;
+}
+
+.proc-head,
+.proc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px 96px 74px 92px;
+  align-items: center;
+  gap: 10px;
+}
+
+.proc-head {
+  padding: 6px 8px;
+  font-size: 11.5px;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.proc-head .sortable {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.proc-head .sortable:hover { color: var(--muted); }
+.proc-head .col-pid, .proc-head .col-cpu, .proc-head .col-mem { justify-content: flex-end; }
+.proc-row .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.proc-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.proc-item { border-bottom: 1px dashed var(--line-soft); }
+.proc-item.is-new { background: rgba(61, 220, 151, 0.07); }
+.proc-item.open { background: rgba(255, 255, 255, 0.03); }
+
+.proc-row {
+  padding: 6px 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.proc-row:hover { background: rgba(255, 255, 255, 0.035); }
+
+.proc-row .col-name,
+.proc-row .col-user {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proc-row .col-user { color: var(--muted); }
+
+.proc-detail { padding: 4px 10px 12px; font-size: 12px; }
+
+.proc-detail .kv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.proc-detail .kv-row > span { flex: 0 0 68px; color: var(--dim); }
+
+.proc-detail .kv-row > b {
+  font-weight: 400;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.proc-detail .kv-row .cmd { color: var(--muted); }
+
+.proc-rows::-webkit-scrollbar { width: 8px; }
+.proc-rows::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+@media (max-width: 900px) {
+  .proc-toolbar { padding: 0 12px 10px; flex-wrap: wrap; gap: 6px 12px; }
+  .proc-search { flex: 1 1 100%; }
+  .proc-table { padding: 0 12px; }
+  .proc-rows { overflow: visible; }   /* 手机端整页滚动，不做内部滚动区 */
+}
+
+@media (max-width: 560px) {
+  .proc-head, .proc-row { grid-template-columns: minmax(0, 1fr) 62px 84px; }
+  .proc-head .col-pid, .proc-row .col-pid,
+  .proc-head .col-user, .proc-row .col-user { display: none; }
+}

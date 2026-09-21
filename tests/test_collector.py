@@ -15,8 +15,8 @@ from unittest import mock
 
 import psutil
 
-from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, is_virtual_nic,
-                       listen_ports, pick_nic, temp_entry_key)
+from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, container_id_from_cgroup,
+                       is_virtual_nic, listen_ports, pick_nic, temp_entry_key)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -252,6 +252,78 @@ class CollectorSnapshotTest(unittest.TestCase):
             self.assertLessEqual(battery["percent"], 100)
         else:
             self.assertTrue(battery["reason"])
+
+
+class ContainerCgroupTest(unittest.TestCase):
+    """从 cgroup 识别容器归属：兼容 docker / containerd / podman 的写法。"""
+
+    def test_docker_scope_and_path_forms(self):
+        cases = {
+            "0::/system.slice/docker-1a2b3c4d5e6f7890a1b2c3d4e5f60718.scope": "1a2b3c4d5e6f7890a1b2c3d4e5f60718",
+            "12:memory:/docker/1a2b3c4d5e6f7890a1b2c3d4e5f60718": "1a2b3c4d5e6f7890a1b2c3d4e5f60718",
+            "0::/kubepods/besteffort/pod1/cri-containerd-1a2b3c4d5e6f7890a1b2c3d4e5f60718.scope":
+                "1a2b3c4d5e6f7890a1b2c3d4e5f60718",
+            "0::/user.slice/user-1000.slice/session-1.scope": None,
+            "0::/system.slice/ssh.service": None,
+            "": None,
+        }
+        for text, expected in cases.items():
+            self.assertEqual(container_id_from_cgroup(text), expected, text)
+
+
+class ProcessListTest(unittest.TestCase):
+    """对着真实系统跑：只断言结构与不变量。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.collector = Collector()
+        cls.collector.process_list()
+        time.sleep(0.2)
+        cls.rows = cls.collector.process_list()
+
+    def test_rows_carry_all_fields(self):
+        self.assertTrue(self.rows)
+        for row in self.rows[:20]:
+            for key in ("pid", "name", "user", "cpu", "rss_mb", "status",
+                        "threads", "started", "cmd", "container"):
+                self.assertIn(key, row, key)
+            self.assertGreater(row["pid"], 0)
+            self.assertGreaterEqual(row["cpu"], 0.0)
+            self.assertLessEqual(row["cpu"], 100.0, "CPU 应当归一化到 0-100")
+            self.assertGreaterEqual(row["rss_mb"], 0.0)
+            self.assertGreaterEqual(row["threads"], 1)
+            self.assertGreater(row["started"], 0)
+
+    def test_sorted_by_cpu_desc(self):
+        cpus = [row["cpu"] for row in self.rows]
+        self.assertEqual(cpus, sorted(cpus, reverse=True))
+
+    def test_contains_current_process(self):
+        pids = {row["pid"] for row in self.rows}
+        self.assertIn(os.getpid(), pids)
+
+    def test_processes_helper_limits(self):
+        self.assertLessEqual(len(self.collector.processes(limit=5)), 5)
+
+    def test_container_id_from_proc(self):
+        collector = Collector.__new__(Collector)
+        with mock.patch.object(Collector, "_read_sys",
+                               return_value="0::/system.slice/docker-1a2b3c4d5e6f7890a1b2.scope"):
+            self.assertEqual(collector._process_container_id(1234), "1a2b3c4d5e6f")
+        with mock.patch.object(Collector, "_read_sys",
+                               return_value="0::/user.slice/session-1.scope"):
+            self.assertIsNone(collector._process_container_id(1234))
+
+    def test_container_name_resolved_live(self):
+        """名字映射可能晚于首次见到进程才建立，所以每次读取时实时映射。"""
+        collector = Collector.__new__(Collector)
+        collector._container_names = {}
+        self.assertEqual(collector._container_of("abcdef123456"),
+                         {"id": "abcdef123456", "name": None})
+        collector._container_names = {"abcdef123456": "homeassistant"}
+        self.assertEqual(collector._container_of("abcdef123456"),
+                         {"id": "abcdef123456", "name": "homeassistant"})
+        self.assertIsNone(collector._container_of(None))
 
 
 class PowerRaplTest(unittest.TestCase):

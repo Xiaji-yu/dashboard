@@ -109,11 +109,13 @@ class HttpApiTest(unittest.TestCase):
         cls.collector.sample()          # 预热差分型指标
         time.sleep(0.2)
         snapshot = cls.collector.sample()
-        snapshot["processes"] = cls.collector.processes()
-        snapshot["process_count"] = cls.collector.process_count()
+        rows = cls.collector.process_list()
+        snapshot["processes"] = rows[:6]
+        snapshot["process_count"] = len(rows)
 
         with server.state_lock:
             server.state["snapshot"] = snapshot
+            server.state["processes"] = rows
             server.state["series_ts"] = snapshot["ts"]
             for key, value in server.series_values(snapshot).items():
                 server.state["history"].append(key, snapshot["ts"], value)
@@ -188,6 +190,26 @@ class HttpApiTest(unittest.TestCase):
                     "power", "window", "interval"):
             self.assertIn(key, payload, key)
         self.assertIsInstance(payload["temps"].get("list", []), list)
+
+    def test_processes_contract(self):
+        status, ctype, body = self.request("/api/processes")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", ctype)
+        payload = json.loads(body)
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["count"], len(payload["processes"]))
+        self.assertGreater(payload["count"], 10)
+        first = payload["processes"][0]
+        for key in ("pid", "name", "user", "cpu", "rss_mb", "status", "threads",
+                    "started", "cmd", "container"):
+            self.assertIn(key, first, key)
+
+    def test_overview_keeps_process_list_small(self):
+        """概览快照只带前 6 条，完整列表由 /api/processes 单独提供。"""
+        _, _, body = self.request("/api/overview")
+        payload = json.loads(body)
+        self.assertLessEqual(len(payload["processes"]), 6)
+        self.assertGreater(payload["process_count"], 10)
 
     def test_series_keys_param_filters_output(self):
         status, _, body = self.request("/api/series?keys=cpu,temp")

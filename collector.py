@@ -40,6 +40,20 @@ MIB = 1024.0 ** 2
 # 风扇 key 的中文命名，其余 key 直接展示原始 label
 FAN_LABELS = {"cpu_fan": "CPU 风扇", "gpu_fan": "GPU 风扇", "fan1": "机箱风扇"}
 
+# 从 /proc/<pid>/cgroup 识别容器归属：兼容 docker / containerd / podman 的几种写法
+CONTAINER_ID_RE = re.compile(
+    r"(?:docker-|/docker/|cri-containerd-|/cri-containerd/|libpod-)([0-9a-f]{12,64})"
+)
+
+
+def container_id_from_cgroup(text):
+    """从 cgroup 内容里取出容器 ID；不是容器进程就返回 None。"""
+    for line in (text or "").splitlines():
+        match = CONTAINER_ID_RE.search(line)
+        if match:
+            return match.group(1)
+    return None
+
 
 def rapl_dir():
     """RAPL 根目录。环境变量可覆盖，便于测试时指向夹具目录。"""
@@ -154,6 +168,8 @@ class Collector:
         self._rapl_note_at = 0.0
         self._rapl_domains = None
         self._procs = {}
+        self._proc_static = {}
+        self._container_names = {}
         self._services = None
         self._services_at = 0.0
         self._services_lock = threading.Lock()
@@ -209,10 +225,17 @@ class Collector:
             self._procs[proc.pid] = proc
 
     def processes(self, limit=6):
-        """CPU 占用最高的若干进程。
+        """CPU 占用最高的若干进程（概览页用）。"""
+        return self.process_list()[:limit]
+
+    def process_list(self):
+        """全部进程。
 
         CPU 值按逻辑核心数归一化到 0-100，口径贴近 macOS 活动监视器；
         `top`/`ps` 显示的原始值最高可达 100 x 核心数，顺序一致、数值约为其 1/核心数。
+
+        静态字段（用户、命令行、容器归属）按 pid 缓存，只有首次见到该 pid 才读
+        `/proc/<pid>/{cmdline,cgroup}`；pid 复用靠比对启动时间来识别。
         """
         rows = []
         for proc in list(self._procs.values()):
@@ -221,25 +244,71 @@ class Collector:
                     cpu = proc.cpu_percent(interval=None) / self.cores
                     rss = proc.memory_info().rss
                     name = proc.name()
+                    status = proc.status()
+                    threads = proc.num_threads()
+                    create_time = proc.create_time()
                     pid = proc.pid
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 self._procs.pop(proc.pid, None)
+                self._proc_static.pop(proc.pid, None)
                 continue
-            rows.append({"pid": pid, "name": name, "cpu": round(cpu, 1),
-                         "rss_mb": round(rss / MIB, 1)})
+            static = self._process_static(proc, create_time)
+            rows.append({
+                "pid": pid,
+                "name": name,
+                "user": static["user"],
+                "cpu": round(cpu, 1),
+                "rss_mb": round(rss / MIB, 1),
+                "status": status,
+                "threads": threads,
+                "started": round(create_time),
+                "cmd": static["cmd"] or name,
+                "container": self._container_of(static["container_id"]),
+            })
 
-        # 补进新出现的进程并预热，下次采样才有值
-        for proc in psutil.process_iter(["pid"]):
-            if proc.pid in self._procs:
-                continue
-            try:
-                proc.cpu_percent(interval=None)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-            self._procs[proc.pid] = proc
+        self._prime_processes()  # 补进新出现的进程并预热，下次采样才有值
+        for pid in list(self._proc_static):
+            if pid not in self._procs:
+                self._proc_static.pop(pid, None)
 
         rows.sort(key=lambda row: (row["cpu"], row["rss_mb"]), reverse=True)
-        return rows[:limit]
+        return rows
+
+    def _process_static(self, proc, create_time):
+        """进程的不变信息：用户、命令行、容器归属。"""
+        pid = proc.pid
+        cached = self._proc_static.get(pid)
+        if cached and cached["create_time"] == create_time:
+            return cached
+        info = {"create_time": create_time, "user": None, "cmd": "", "container_id": None}
+        try:
+            info["user"] = proc.username()
+        except (psutil.AccessDenied, psutil.NoSuchProcess, KeyError):
+            info["user"] = None
+        name = proc.name() or ""
+        try:
+            parts = proc.cmdline()
+            cmd = " ".join(parts)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            cmd = ""              # 非 root 读不到别人的命令行，前端显示「无权限」
+        if len(cmd) > 400:
+            cmd = cmd[:400]       # 极少数超长命令行，截断以控制轮询载荷
+        info["cmd"] = "" if cmd == name else cmd   # 与进程名相同就不重复发
+        info["container_id"] = self._process_container_id(pid)
+        self._proc_static[pid] = info
+        return info
+
+    def _process_container_id(self, pid):
+        """进程是否跑在容器里：读 cgroup 拿容器 ID（只缓存 ID，名字每次实时映射）。"""
+        raw = self._read_sys(f"/proc/{pid}/cgroup")
+        container_id = container_id_from_cgroup(raw)
+        return container_id[:12] if container_id else None
+
+    def _container_of(self, container_id):
+        """容器 ID -> 展示用信息。名字来自 docker ps（5 秒缓存），查不到就只给 ID。"""
+        if not container_id:
+            return None
+        return {"id": container_id, "name": self._container_names.get(container_id)}
 
     def process_count(self):
         return len(self._procs)
@@ -641,7 +710,7 @@ class Collector:
         self._container_running = 0
         try:
             done = subprocess.run(
-                ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"],
+                ["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.ID}}"],
                 capture_output=True, text=True, timeout=4, check=False,
             )
         except FileNotFoundError:
@@ -656,14 +725,20 @@ class Collector:
             return [], (first_line[0] if first_line else f"docker 返回码 {done.returncode}")
 
         rows = []
+        names = {}
         for line in done.stdout.splitlines():
             if not line.strip():
                 continue
-            name, _, status = line.partition("\t")
-            status = status.strip()
-            rows.append({"group": "容器", "name": name.strip(),
+            parts = line.split("\t")
+            name = parts[0].strip()
+            status = parts[1].strip() if len(parts) > 1 else ""
+            container_id = parts[2].strip() if len(parts) > 2 else ""
+            if container_id:
+                names[container_id[:12]] = name
+            rows.append({"group": "容器", "name": name,
                          "status": "ok" if status.lower().startswith("up") else "down",
                          "detail": status})
+        self._container_names = names   # 供进程页做「这个进程属于哪个容器」
         rows.sort(key=lambda row: (row["status"] != "ok", row["name"]))
         # 汇总用完整列表统计，展示则受 limit 限制
         self._container_total = len(rows)

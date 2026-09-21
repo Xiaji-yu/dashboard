@@ -47,7 +47,7 @@ PERF_SERIES_KEYS = ("fan_cpu", "gpu_mhz", "temp_acpi", "cpu_max")
 PERCORE_KEY_RE = re.compile(r"cpu\d{1,2}")
 
 state_lock = threading.Lock()
-state = {"snapshot": None, "history": History(), "series_ts": 0.0}
+state = {"snapshot": None, "history": History(), "series_ts": 0.0, "processes": []}
 
 
 def valid_series_key(key):
@@ -106,11 +106,15 @@ def sampler(collector):
         started = time.time()
         try:
             snapshot = collector.sample()
-            snapshot["processes"] = collector.processes()
-            snapshot["process_count"] = collector.process_count()
+            rows = collector.process_list()
+            # 完整进程表放在 state 里单独服务 /api/processes，
+            # 概览快照只留前 6 条，避免每次轮询都拖着 30KB 的列表。
+            snapshot["processes"] = rows[:6]
+            snapshot["process_count"] = len(rows)
             with state_lock:
                 state["snapshot"] = snapshot
                 state["series_ts"] = snapshot["ts"]
+                state["processes"] = rows
                 for key, value in series_values(snapshot).items():
                     state["history"].append(key, snapshot["ts"], value)
                 for key, value in performance_series(snapshot).items():
@@ -134,6 +138,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self._overview())
         if path == "/api/performance":
             return self._send_json(self._performance())
+        if path == "/api/processes":
+            return self._send_json(self._processes())
         if path == "/api/series":
             query = parse_qs(parsed.query)
             raw = query.get("since", ["0"])[0]
@@ -186,6 +192,16 @@ class Handler(BaseHTTPRequestHandler):
         payload["window"] = WINDOW_SECONDS
         payload["interval"] = INTERVAL
         return payload
+
+    @staticmethod
+    def _processes():
+        with state_lock:
+            rows = state["processes"]
+            snapshot = state["snapshot"]
+        if not rows or snapshot is None:
+            return {"ready": False, "window": WINDOW_SECONDS}
+        return {"ready": True, "ts": snapshot["ts"], "count": len(rows),
+                "interval": INTERVAL, "processes": rows}
 
     @staticmethod
     def _series(since_ts, keys=None):
