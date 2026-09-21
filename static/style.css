@@ -526,6 +526,11 @@ body {
     min-height: 100vh;
     overflow: visible;
   }
+
+  /* 曲线行是 flex:1 1 0、图表是 height:100%，父容器必须有确定高度。
+     桌面端父容器已改为自然高度，上层因此改用视口高度作参照，不能再用百分比。
+     手机端上层保持内容自然高度（固定 58vh 会在矮屏上装不下 5 行而溢出卡片）。 */
+  .perf-upper { height: 58vh; min-height: 380px; }
 }
 
 .perf-upper, .perf-lower { flex: none; }

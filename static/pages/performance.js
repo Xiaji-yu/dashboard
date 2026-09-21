@@ -194,6 +194,11 @@
     return list.reduce(function (sum, item) { return sum + item; }, 0) / list.length;
   }
 
+  /* 「机身温区」->「机身」、「CPU 核心 0」->「核心 0」，让副标题在窄栏里放得下 */
+  function compactTempLabel(label) {
+    return String(label).replace(/^CPU\s*/, '').replace(/温区$/, '').trim();
+  }
+
   function render(perf) {
     var cpu = perf.cpu || {};
 
@@ -236,16 +241,16 @@
       setSub('s-cores', cores.reason || '不可用');
     }
 
-    /* 温度：主值为封装温度，副值列其余通道 */
+    /* 温度：主值为封装温度，副值给最高的其他通道（标签压缩，避免被截断） */
     var temps = perf.temps || {};
     if (temps.available && temps.list && temps.list.length) {
       var channels = temps.list;
       var main = channels.filter(function (item) { return item.key === 'package'; })[0] || channels[0];
       setValue('v-temp', main.celsius.toFixed(0), '°C');
-      var others = channels.filter(function (item) { return item !== main; })
-        .slice(0, 2)
-        .map(function (item) { return item.label + ' ' + item.celsius.toFixed(0) + '°C'; });
-      setSub('s-temp', channels.length + ' 路传感器' + (others.length ? ' · ' + others.join(' · ') : ''));
+      var hottest = channels.filter(function (item) { return item !== main; })
+        .sort(function (a, b) { return b.celsius - a.celsius; })[0];
+      setSub('s-temp', channels.length + ' 路传感器' +
+        (hottest ? ' · 最高 ' + compactTempLabel(hottest.label) + ' ' + hottest.celsius.toFixed(0) + '°C' : ''));
     } else {
       markChartUnavailable('temp', temps.reason || '不可用');
     }
@@ -282,10 +287,11 @@
       markChartUnavailable('gpu', gpu.reason);
     }
 
-    /* 内存构成：应用/缓冲/缓存/空闲 不重叠地堆满总量 */
+    /* 内存构成：按 Linux 经典口径拆成不重叠的四段，正好加满总量 */
     var mem = perf.memory || {};
     if (mem.available) {
-      var appGb = Math.max(0, mem.used_gb - mem.buffers_gb - mem.cached_gb);
+      /* 不能拿 psutil 的 used 再减缓冲/缓存：它等于「总量 - available」，已扣过可回收缓存 */
+      var appGb = Math.max(0, mem.total_gb - mem.free_gb - mem.buffers_gb - mem.cached_gb);
       var segments = [
         ['应用与内核', appGb, '#4fc3f7'],
         ['缓冲', mem.buffers_gb, '#9575cd'],
@@ -301,7 +307,7 @@
           seg[0] + ' ' + seg[1].toFixed(1) + ' GB</span>';
       }).join('');
       document.getElementById('mem-note').textContent =
-        '可用 ' + mem.percent.toFixed(0) + '% 已用 · 交换 ' +
+        '已用 ' + mem.percent.toFixed(0) + '% · 交换 ' +
         mem.swap_used_gb.toFixed(1) + ' / ' + mem.swap_total_gb.toFixed(1) + ' GB';
     } else {
       document.getElementById('mem-note').textContent = mem.reason || '不可用';
