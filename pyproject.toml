@@ -1,0 +1,16 @@
+# 本项目不做打包分发（扁平结构，直接跑 server.py），
+# 此文件只用来集中配置测试与代码风格工具。
+
+[tool.ruff]
+# 注释与文档字符串含中文，行宽放宽到 120（当前最长行 116）
+line-length = 120
+target-version = "py39"
+exclude = [".git", "__pycache__"]
+
+[tool.ruff.lint]
+# 保守规则集：pycodestyle 的 E/W + pyflakes 的 F
+select = ["E", "F", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 测试与 lint 缓存
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 运行时产物
+server.log
+server.pid
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,4 @@
+# 开发依赖：测试与代码风格检查
+-r requirements.txt
+pytest>=7.0
+ruff>=0.5
