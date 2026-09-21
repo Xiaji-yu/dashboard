@@ -38,7 +38,10 @@ sudo nano /etc/systemd/system/dashboard.service      # 改 User= 和 WorkingDire
 需要确认的三处：
 
 - `User=xiaji`：用你自己的账号。**这个用户要在 `docker` 组里**（`id` 看一下有没有 `984(docker)`），
-  否则容器列表会显示「permission denied」。别用 root：unit 里的加固会限制它的能力范围。
+  否则容器列表会显示「permission denied」。
+  **千万别把 `User=` 删掉或留空**：systemd 系统服务在这种情况下默认以 **root** 运行
+  （原文见 `man systemd.exec`：*for system services ... the default is "root"*）。unit 里已经加了一条
+  `ExecStartPre` 兜底——真被删掉时它会直接拒绝启动并打印原因，而不是悄悄拿到 root。
 - `WorkingDirectory` / `ExecStart`：改成你的实际路径。
 - `AmbientCapabilities=CAP_NET_RAW`：**别删**。`/usr/bin/ping` 靠文件能力工作，而 unit 开了
   `NoNewPrivileges=true` 会让文件能力失效；没有这一行，设备页的「局域网设备」会退化成只能看邻居表。
@@ -122,10 +125,30 @@ sudo systemctl restart dashboard
 需要备份的只有两个文件：`auth.json`（账号与会话）与 `probes.json`（服务页探测目标）。
 曲线历史只在内存里，不用备份。
 
-### 8. 排错对照表
+### 8. 到底要不要用 root？（不建议）
+
+以 root 运行确实能多看几样东西，但代价与收益不成比例：
+
+| 以 root 运行能多出来的 | 值不值 |
+| --- | --- |
+| 功耗（RAPL）不用 ExecStartPre 放开权限 | 不值：现在这条已经把它解决了 |
+| 端口归属能显示 root 进程（`docker-proxy`、`sshd` 等） | 不值：为几行进程名把整站交给 root |
+| 能读其他用户的命令行 | 不值：非 root 下本机实测 306 个进程全部可读 |
+
+代价是：这是一个**监听 `0.0.0.0`、只有单账号、且没有 TLS** 的 HTTP 服务，
+解析表单或 JSON 的任何一处疏漏都会变成 root 级别的漏洞。所以：
+
+- 想严格最小权限：保持 `User=xiaji` + unit 里的 `NoNewPrivileges` / `ProtectSystem=full` / `PrivateTmp`，
+  只额外授 `CAP_NET_RAW`（局域网扫描要发 ICMP）；
+- 想让端口归属更全（可选）：再加 `AmbientCapabilities=CAP_NET_RAW CAP_SYS_PTRACE`。
+  但要知道 **`CAP_SYS_PTRACE` 能读写任意进程的内存，读权限上几乎等价于 root**，
+  只是不能改系统文件——是否接受由你判断。
+
+### 9. 排错对照表
 
 | 现象 | 原因与处理 |
 | --- | --- |
+| 服务启动失败，日志里有「拒绝以 root 运行」 | `User=` 被删掉或留空了，补上 `User=你的账号` 即可 |
 | 服务起不来，端口被占 | 还有 run.sh 起的实例：`./run.sh stop` 或 `ss -tlnp \| grep 8282` 看看是谁 |
 | 页面「局域网设备」只有邻居表 | 少了 `AmbientCapabilities=CAP_NET_RAW`，或本机没装 `iputils-ping` |
 | 容器卡显示 permission denied | 服务用户不在 `docker` 组，或 docker 未启动（unit 的 `After=docker.service` 已处理顺序） |
