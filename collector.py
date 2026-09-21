@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -24,6 +25,9 @@ RAPL_ENERGY = "/sys/class/powercap/intel-rapl:0/energy_uj"
 SERVICES_TTL = 5.0
 GIB = 1024.0 ** 3
 MIB = 1024.0 ** 2
+
+# 风扇 key 的中文命名，其余 key 直接展示原始 label
+FAN_LABELS = {"cpu_fan": "CPU 风扇", "gpu_fan": "GPU 风扇", "fan1": "机箱风扇"}
 
 
 def is_virtual_nic(name):
@@ -69,6 +73,57 @@ def listen_ports():
     return sorted(ports)
 
 
+def temp_entry_key(chip, label):
+    """把 hwmon 的 chip/label 归一化成稳定通道 key 与中文展示名。
+
+    key 会成为 /api/series 里的曲线键（temp_acpi 等），必须稳定；
+    展示名给前端直接显示。
+    """
+    chip = (chip or "").lower()
+    lab = (label or "").strip()
+    low = lab.lower()
+    if chip == "coretemp":
+        if "package" in low:
+            return "package", "CPU 封装"
+        num = "".join(ch for ch in low if ch.isdigit())
+        return (f"core{num or 'x'}", f"CPU 核心 {num}" if num else "CPU 核心")
+    if chip.startswith("pch"):
+        return "pch", "芯片组 PCH"
+    if chip in ("acpitz", "acpi"):
+        return "acpi", "机身温区"
+    if chip in ("k10temp", "k8temp", "cpu_thermal"):
+        return "package", "CPU 封装"
+    slug = re.sub(r"[^a-z0-9]+", "_", low or chip).strip("_")[:24] or "misc"
+    return slug, lab or chip
+
+
+def battery_payload(batt, supplies):
+    """把 psutil 电池对象与 /sys/class/power_supply 明细合成降级友好的一份载荷。
+
+    supplies 形如 [{"status": "Not charging", "cycles": "239", "power_uw": "0"}]。
+    放电功率（power_uw > 0）只有真正放电时才有意义，接通电源时保持 None。
+    """
+    if batt is None:
+        return {"available": False, "reason": "本机没有电池"}
+    plugged = bool(batt.power_plugged)
+    status = None
+    cycles = None
+    power_w = None
+    for item in supplies:
+        status = status or item.get("status")
+        raw = item.get("cycles")
+        if cycles is None and raw and raw.isdigit():
+            cycles = int(raw)
+        raw = item.get("power_uw")
+        if power_w is None and raw and raw.isdigit() and int(raw) > 0:
+            power_w = round(int(raw) / 1e6, 2)
+    secsleft = None
+    if not plugged and isinstance(batt.secsleft, int) and 0 < batt.secsleft < 86400 * 30:
+        secsleft = int(batt.secsleft)
+    return {"available": True, "percent": round(batt.percent, 1), "plugged": plugged,
+            "status": status, "cycles": cycles, "power_w": power_w, "secsleft": secsleft}
+
+
 class Collector:
     """采样本机指标。进程 CPU、网速、功耗都靠两次采样求差分。"""
 
@@ -87,8 +142,43 @@ class Collector:
         self._container_note = ""
         self._container_total = 0
         self._container_running = 0
+        self._gpu_card = self._find_gpu_card()
+        self._core_topology = self._read_core_topology()
         psutil.cpu_percent(interval=None)  # 预热，让首次采样就有意义
         self._prime_processes()
+
+    # ---------------- 静态探测（进程启动时做一次） ----------------
+
+    @staticmethod
+    def _find_gpu_card():
+        """找第一个暴露 gt_cur_freq_mhz 的显卡（Intel 核显的 i915/xe 接口）。"""
+        base = "/sys/class/drm"
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return None
+        for name in names:
+            if re.fullmatch(r"card\d+", name) and os.path.exists(
+                os.path.join(base, name, "gt_cur_freq_mhz")
+            ):
+                return name
+        return None
+
+    def _read_core_topology(self):
+        """逻辑核序号 -> 物理核心号（读不到为 -1），用于每核占用的展示口径。"""
+        topology = []
+        for i in range(self.cores):
+            raw = self._read_sys(f"/sys/devices/system/cpu/cpu{i}/topology/core_id")
+            topology.append(int(raw) if raw and raw.lstrip("-").isdigit() else -1)
+        return topology
+
+    @staticmethod
+    def _read_sys(path):
+        try:
+            with open(path, "r") as handle:
+                return handle.read().strip()
+        except OSError:
+            return None
 
     # ---------------- 进程 ----------------
 
@@ -140,18 +230,35 @@ class Collector:
 
     def sample(self):
         now = time.time()
+        cpu = self._cpu()
+        cpu["per_core"] = self._percpu()
+        memory = self._memory()
+        temps = self._all_temps()
+        load = self._load()
+        power = self._power(now)
         return {
             "ts": now,
             "host": socket.gethostname(),
             "cores": self.cores,
             "uptime_s": max(0.0, now - self.boot_time),
-            "cpu": self._cpu(),
-            "memory": self._memory(),
-            "power": self._power(now),
+            "cpu": cpu,
+            "memory": memory,
+            "power": power,
             "net": self._net(now),
             "disk": self._disk(),
-            "temp": self._temp(),
-            "load": self._load(),
+            "temp": self._temp_from(temps),
+            "load": load,
+            # 性能与电源页的数据段：与概览共享同一批采样结果，不重复读内核
+            "performance": {
+                "cpu": cpu,
+                "gpu": self._gpu_freq(),
+                "temps": temps,
+                "fans": self._fans(),
+                "battery": self._battery(),
+                "memory": memory,
+                "load": load,
+                "power": power,
+            },
         }
 
     def _cpu(self):
@@ -173,7 +280,7 @@ class Collector:
             vm = psutil.virtual_memory()
             total = vm.total / GIB
             used = (vm.total - vm.available) / GIB
-            swap_used = psutil.swap_memory().used / GIB
+            swap = psutil.swap_memory()
         except Exception as exc:
             return {"available": False, "reason": f"内存采样失败：{exc}"}
         return {
@@ -181,7 +288,12 @@ class Collector:
             "used_gb": round(used, 1),
             "total_gb": round(total, 1),
             "percent": round(used / total * 100, 1) if total else 0.0,
-            "swap_used_gb": round(swap_used, 1),
+            "free_gb": round(vm.free / GIB, 1),
+            "buffers_gb": round(vm.buffers / GIB, 2),
+            "cached_gb": round(vm.cached / GIB, 2),
+            "shared_gb": round(vm.shared / GIB, 2),
+            "swap_total_gb": round(swap.total / GIB, 1),
+            "swap_used_gb": round(swap.used / GIB, 1),
         }
 
     def _power(self, now):
@@ -250,29 +362,119 @@ class Collector:
         }
 
     def _temp(self):
+        """概览用的单值温度：从全部通道里挑封装温度，退化到第一个通道。"""
+        return self._temp_from(self._all_temps())
+
+    def _all_temps(self):
+        """全部温度通道。性能页展示列表，概览的单值温度也从这里挑，避免重复读 sysfs。"""
         try:
             sensors = psutil.sensors_temperatures() or {}
         except Exception as exc:
             return {"available": False, "reason": f"温度采样失败：{exc}"}
-        if not sensors:
+        entries = []
+        for chip, items in sensors.items():
+            for item in items:
+                if not item.current:
+                    continue
+                key, label = temp_entry_key(chip, item.label)
+                entries.append({"key": key, "label": label,
+                                "celsius": round(item.current, 1)})
+        if not entries:
             return {"available": False, "reason": "本机没有可读的温度传感器"}
+        unique = []
+        seen = set()
+        for entry in sorted(entries, key=lambda item: item["key"]):
+            if entry["key"] in seen:  # 同名通道只留一个
+                continue
+            seen.add(entry["key"])
+            unique.append(entry)
+        return {"available": True, "list": unique}
 
-        for entry in sensors.get("coretemp", ()):
-            label = (entry.label or "").lower()
-            if "package" in label and entry.current:
-                return {"available": True, "celsius": round(entry.current, 1),
-                        "source": entry.label}
-        for key in ("coretemp", "k10temp", "cpu_thermal", "acpitz"):
-            for entry in sensors.get(key, ()):
-                if entry.current:
-                    return {"available": True, "celsius": round(entry.current, 1),
-                            "source": entry.label or key}
-        for key, entries in sensors.items():
-            for entry in entries:
-                if entry.current:
-                    return {"available": True, "celsius": round(entry.current, 1),
-                            "source": entry.label or key}
-        return {"available": False, "reason": "温度传感器没有返回数值"}
+    @staticmethod
+    def _temp_from(temps):
+        if not temps.get("available"):
+            return {"available": False, "reason": temps.get("reason") or "温度不可用"}
+        entries = temps["list"]
+        for entry in entries:
+            if entry["key"] == "package":
+                return {"available": True, "celsius": entry["celsius"],
+                        "source": entry["label"]}
+        entry = entries[0]
+        return {"available": True, "celsius": entry["celsius"], "source": entry["label"]}
+
+    def _percpu(self):
+        """每逻辑核占用与频率。percpu 与 _cpu() 的总量在 psutil 里各自独立记差分。"""
+        try:
+            percents = psutil.cpu_percent(interval=None, percpu=True)
+            freqs = psutil.cpu_freq(percpu=True)
+        except Exception as exc:
+            return {"available": False, "reason": f"每核采样失败：{exc}"}
+        if not percents:
+            return {"available": False, "reason": "每核采样没有返回数据"}
+        freq_list = None
+        try:
+            values = [round(item.current) for item in (freqs or []) if item and item.current]
+            if len(values) == len(percents):
+                freq_list = values
+        except Exception:
+            freq_list = None
+        return {"available": True,
+                "per_cpu": [round(p, 1) for p in percents],
+                "freq_mhz": freq_list,
+                "topology": self._core_topology}
+
+    def _gpu_freq(self):
+        """核显当前/最大频率（gt_cur_freq_mhz）。利用率无标准接口，如实显示不可用。"""
+        if not self._gpu_card:
+            return {"available": False, "reason": "本机没有可读的 GPU 频率接口"}
+        base = f"/sys/class/drm/{self._gpu_card}"
+        raw = self._read_sys(f"{base}/gt_cur_freq_mhz")
+        if not raw or not raw.isdigit():
+            return {"available": False, "reason": "GPU 频率读取失败"}
+        top = self._read_sys(f"{base}/gt_max_freq_mhz")
+        return {"available": True, "card": self._gpu_card, "freq_mhz": int(raw),
+                "max_mhz": int(top) if top and top.isdigit() else None}
+
+    def _fans(self):
+        """全部风扇转速。读数为 0 的（如停转的 gpu_fan）也如实保留。"""
+        try:
+            chips = psutil.sensors_fans() or {}
+        except Exception as exc:
+            return {"available": False, "reason": f"风扇采样失败：{exc}"}
+        fans = []
+        for chip, items in chips.items():
+            for item in items:
+                key = (item.label or chip).strip().lower().replace(" ", "_")[:24]
+                fans.append({"key": key, "label": FAN_LABELS.get(key, item.label or chip),
+                             "rpm": item.current})
+        if not fans:
+            return {"available": False, "reason": "本机没有可读的风扇转速"}
+        return {"available": True, "list": fans}
+
+    def _battery(self):
+        """电池状态：psutil 提供电量与接通状态，循环次数/放电功率来自 sysfs。"""
+        try:
+            batt = psutil.sensors_battery()
+        except Exception:
+            batt = None
+        return battery_payload(batt, self._power_supplies())
+
+    def _power_supplies(self):
+        supplies = []
+        try:
+            names = sorted(os.listdir("/sys/class/power_supply"))
+        except OSError:
+            return supplies
+        for name in names:
+            path = os.path.join("/sys/class/power_supply", name)
+            if self._read_sys(os.path.join(path, "type")) != "Battery":
+                continue
+            supplies.append({
+                "status": self._read_sys(os.path.join(path, "status")),
+                "cycles": self._read_sys(os.path.join(path, "cycle_count")),
+                "power_uw": self._read_sys(os.path.join(path, "power_now")),
+            })
+        return supplies
 
     @staticmethod
     def _load():

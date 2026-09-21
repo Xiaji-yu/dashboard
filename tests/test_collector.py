@@ -8,11 +8,13 @@ import os
 import socket
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import psutil
 
-from collector import Collector, is_virtual_nic, listen_ports, pick_nic
+from collector import (Collector, battery_payload, is_virtual_nic, listen_ports,
+                       pick_nic, temp_entry_key)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -91,6 +93,55 @@ class ListenPortsTest(unittest.TestCase):
             self.assertEqual(listen_ports(), [])
 
 
+class TempEntryKeyTest(unittest.TestCase):
+    """hwmon chip/label -> 稳定曲线键 + 中文展示名。"""
+
+    def test_coretemp_channels(self):
+        self.assertEqual(temp_entry_key("coretemp", "Package id 0"), ("package", "CPU 封装"))
+        self.assertEqual(temp_entry_key("coretemp", "Core 0"), ("core0", "CPU 核心 0"))
+        self.assertEqual(temp_entry_key("coretemp", "Core 1"), ("core1", "CPU 核心 1"))
+
+    def test_pch_and_acpi(self):
+        self.assertEqual(temp_entry_key("pch_skylake", ""), ("pch", "芯片组 PCH"))
+        self.assertEqual(temp_entry_key("acpitz", ""), ("acpi", "机身温区"))
+        self.assertEqual(temp_entry_key("cpu_thermal", ""), ("package", "CPU 封装"))
+
+    def test_unknown_chip_falls_back_to_slug(self):
+        key, label = temp_entry_key("nvme", "Composite")
+        self.assertEqual(key, "composite")
+        self.assertEqual(label, "Composite")
+
+
+class BatteryPayloadTest(unittest.TestCase):
+    """电池载荷合成：plugged/放电两种形态，以及完全没有电池的降级。"""
+
+    def test_without_battery_reports_unavailable(self):
+        payload = battery_payload(None, [])
+        self.assertFalse(payload["available"])
+        self.assertTrue(payload["reason"])
+
+    def test_plugged_battery_keeps_zero_power_out(self):
+        batt = SimpleNamespace(percent=94.7, power_plugged=True, secsleft=-2)
+        payload = battery_payload(
+            batt, [{"status": "Not charging", "cycles": "239", "power_uw": "0"}])
+        self.assertTrue(payload["available"])
+        self.assertEqual(payload["percent"], 94.7)
+        self.assertTrue(payload["plugged"])
+        self.assertEqual(payload["status"], "Not charging")
+        self.assertEqual(payload["cycles"], 239)
+        self.assertIsNone(payload["power_w"])  # 接通电源时 power_now=0 不作为功率展示
+        self.assertIsNone(payload["secsleft"])
+
+    def test_discharging_battery_reports_power_and_timeleft(self):
+        batt = SimpleNamespace(percent=61.2, power_plugged=False, secsleft=7200)
+        payload = battery_payload(
+            batt, [{"status": "Discharging", "cycles": "239", "power_uw": "12300000"}])
+        self.assertTrue(payload["available"])
+        self.assertFalse(payload["plugged"])
+        self.assertAlmostEqual(payload["power_w"], 12.3)
+        self.assertEqual(payload["secsleft"], 7200)
+
+
 class CollectorSnapshotTest(unittest.TestCase):
     """对着真实系统跑：只断言结构与不变量，不断言具体数值。"""
 
@@ -153,6 +204,52 @@ class CollectorSnapshotTest(unittest.TestCase):
             self.assertGreaterEqual(row["rss_mb"], 0.0)
         cpus = [row["cpu"] for row in rows]
         self.assertEqual(cpus, sorted(cpus, reverse=True))
+
+    def test_memory_carries_breakdown_fields(self):
+        memory = self.snapshot["memory"]
+        self.assertTrue(memory["available"])
+        for key in ("free_gb", "buffers_gb", "cached_gb", "shared_gb", "swap_total_gb"):
+            self.assertIn(key, memory)
+            self.assertGreaterEqual(memory[key], 0)
+
+    def test_performance_section_structure(self):
+        perf = self.snapshot["performance"]
+        for key in ("cpu", "gpu", "temps", "fans", "battery", "memory", "load", "power"):
+            self.assertIn(key, perf, key)
+
+        cores = perf["cpu"]["per_core"]
+        self.assertTrue(cores["available"])
+        self.assertEqual(len(cores["per_cpu"]), self.collector.cores)
+        self.assertEqual(len(cores["topology"]), self.collector.cores)
+        for percent in cores["per_cpu"]:
+            self.assertGreaterEqual(percent, 0.0)
+            self.assertLessEqual(percent, 100.0)
+
+        temps = perf["temps"]
+        if temps["available"]:
+            self.assertTrue(temps["list"])
+            for entry in temps["list"]:
+                self.assertIn("key", entry)
+                self.assertIn("label", entry)
+                self.assertGreater(entry["celsius"], -60)
+        else:
+            self.assertTrue(temps["reason"])
+
+        fans = perf["fans"]
+        if fans["available"]:
+            for fan in fans["list"]:
+                self.assertIn("key", fan)
+                self.assertIn("label", fan)
+                self.assertGreaterEqual(fan["rpm"], 0)
+        else:
+            self.assertTrue(fans["reason"])
+
+        battery = perf["battery"]
+        if battery["available"]:
+            self.assertGreaterEqual(battery["percent"], 0)
+            self.assertLessEqual(battery["percent"], 100)
+        else:
+            self.assertTrue(battery["reason"])
 
 
 class DegradationTest(unittest.TestCase):
@@ -237,6 +334,43 @@ class DegradationTest(unittest.TestCase):
             rows, note = Collector._docker_containers(self._bare_collector())
         self.assertEqual(rows, [])
         self.assertIn("docker", note)
+
+    def test_temperature_exception_is_degraded(self):
+        collector = self._bare_collector()
+        with mock.patch.object(psutil, "sensors_temperatures", side_effect=RuntimeError("boom")):
+            result = collector._temp()
+        self.assertFalse(result["available"])
+        self.assertIn("温度采样失败", result["reason"])
+
+    def test_no_fans_is_degraded(self):
+        collector = self._bare_collector()
+        with mock.patch.object(psutil, "sensors_fans", return_value={}):
+            result = collector._fans()
+        self.assertFalse(result["available"])
+        self.assertTrue(result["reason"])
+
+    def test_gpu_without_card_is_degraded(self):
+        collector = self._bare_collector()
+        collector._gpu_card = None
+        result = collector._gpu_freq()
+        self.assertFalse(result["available"])
+        self.assertIn("GPU", result["reason"])
+
+    def test_gpu_frequency_read(self):
+        collector = self._bare_collector()
+        collector._gpu_card = "card0"
+        with mock.patch.object(Collector, "_read_sys", side_effect=["350", "1000"]):
+            result = collector._gpu_freq()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["freq_mhz"], 350)
+        self.assertEqual(result["max_mhz"], 1000)
+
+    def test_battery_without_sensor_is_degraded(self):
+        collector = self._bare_collector()
+        with mock.patch.object(psutil, "sensors_battery", return_value=None):
+            result = collector._battery()
+        self.assertFalse(result["available"])
+        self.assertIn("电池", result["reason"])
 
 
 if __name__ == "__main__":

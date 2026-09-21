@@ -55,6 +55,53 @@ class SeriesValuesTest(unittest.TestCase):
         self.assertEqual(sorted(values.keys()), sorted(server.SERIES_KEYS))
 
 
+class PerformanceSeriesTest(unittest.TestCase):
+    """performance 段 -> 性能页曲线序列（cpu0..3、风扇、GPU、ACPI 温度）。"""
+
+    def test_extracts_perf_series(self):
+        snapshot = {
+            "performance": {
+                "cpu": {"available": True, "percent": 10.0,
+                        "per_core": {"available": True, "per_cpu": [5.0, 6.0, 7.0, 8.0]}},
+                "fans": {"available": True,
+                         "list": [{"key": "cpu_fan", "label": "CPU 风扇", "rpm": 2600},
+                                  {"key": "gpu_fan", "label": "GPU 风扇", "rpm": 0}]},
+                "gpu": {"available": True, "freq_mhz": 350, "max_mhz": 1000},
+                "temps": {"available": True,
+                          "list": [{"key": "acpi", "label": "机身温区", "celsius": 60.0},
+                                   {"key": "package", "label": "CPU 封装", "celsius": 62.0}]},
+            }
+        }
+        values = server.performance_series(snapshot)
+        self.assertEqual(values, {
+            "cpu0": 5.0, "cpu1": 6.0, "cpu2": 7.0, "cpu3": 8.0,
+            "fan_cpu": 2600, "gpu_mhz": 350, "temp_acpi": 60.0,
+        })
+
+    def test_missing_performance_section_maps_to_empty(self):
+        self.assertEqual(server.performance_series(make_snapshot()), {})
+        self.assertEqual(server.performance_series({}), {})
+
+    def test_unavailable_pieces_are_skipped(self):
+        snapshot = {"performance": {"cpu": {"per_core": {"available": False}},
+                                    "fans": {"available": False}}}
+        self.assertEqual(server.performance_series(snapshot), {})
+
+
+class SeriesKeyWhitelistTest(unittest.TestCase):
+    def test_known_keys_pass(self):
+        for key in server.SERIES_KEYS:
+            self.assertTrue(server.valid_series_key(key), key)
+        for key in server.PERF_SERIES_KEYS:
+            self.assertTrue(server.valid_series_key(key), key)
+        self.assertTrue(server.valid_series_key("cpu0"))
+        self.assertTrue(server.valid_series_key("cpu23"))
+
+    def test_unknown_keys_rejected(self):
+        for key in ("temp2x", "mem", "../etc", "cpu;rm", ""):
+            self.assertFalse(server.valid_series_key(key), repr(key))
+
+
 class HttpApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -128,6 +175,33 @@ class HttpApiTest(unittest.TestCase):
         status, _, body = self.request("/api/series?since=abc")
         self.assertEqual(status, 200)
         self.assertIn("series", json.loads(body))
+
+    def test_performance_contract(self):
+        status, ctype, body = self.request("/api/performance")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", ctype)
+        payload = json.loads(body)
+        self.assertTrue(payload["ready"])
+        for key in ("ts", "cpu", "gpu", "temps", "fans", "battery", "memory", "load",
+                    "power", "window"):
+            self.assertIn(key, payload, key)
+        self.assertIsInstance(payload["temps"].get("list", []), list)
+
+    def test_series_keys_param_filters_output(self):
+        status, _, body = self.request("/api/series?keys=cpu,temp")
+        self.assertEqual(status, 200)
+        series = json.loads(body)["series"]
+        self.assertEqual(sorted(series.keys()), ["cpu", "temp"])
+
+    def test_series_keys_param_supports_perf_keys(self):
+        status, _, body = self.request("/api/series?keys=fan_cpu,gpu_mhz,cpu0")
+        self.assertEqual(status, 200)
+        self.assertEqual(sorted(json.loads(body)["series"].keys()),
+                         ["cpu0", "fan_cpu", "gpu_mhz"])
+
+    def test_series_unknown_key_returns_400(self):
+        status, _, _ = self.request("/api/series?keys=cpu,definitely-not-a-key")
+        self.assertEqual(status, 400)
 
     def test_index_page_served(self):
         status, ctype, body = self.request("/")

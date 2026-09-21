@@ -1,25 +1,26 @@
-/* 8282 总控台 —— 概览页渲染与轮询 */
+/* 8282 总控台 —— 前端核心：hash 路由、徽章轮询、公共工具。
+   各页面模块放在 static/pages/<id>.js，向 window.DashPages 注册：
+     DashPages.<id> = { title, mount(host), tick(), interval, badges }
+   本文件不包含任何具体页面的渲染逻辑。 */
 'use strict';
 
 var WINDOW_SECONDS = 120;
 
-/* 上半部分：去掉示意图后的 5 条指标，曲线铺满整行 */
-var METRICS = [
-  { key: 'cpu', label: 'CPU 占用', hex: '#3ddc97',
-    series: [{ key: 'cpu', color: '#3ddc97', fill: true }], fixed: [0, 100] },
-  { key: 'mem', label: '内存', hex: '#4fc3f7',
-    series: [{ key: 'mem_used', color: '#4fc3f7', fill: true }], autoMinTop: 1 },
-  { key: 'power', label: '整机功耗', hex: '#ffb74d',
-    series: [{ key: 'power', color: '#ffb74d', fill: true }], autoMinTop: 10 },
-  { key: 'net', label: '网速', hex: null,
-    series: [{ key: 'net_down', color: '#3ddc97', fill: false },
-             { key: 'net_up', color: '#ff6b9d', fill: false }], autoMinTop: 4096 },
-  { key: 'disk', label: '磁盘剩余', hex: '#ffd54f', bar: true }
-];
+window.DashPages = window.DashPages || {};
 
-var state = { charts: {}, lastSeriesTs: 0, paused: false, tick: 0 };
+var PAGE_TITLES = {
+  overview: '概览',
+  performance: '性能与电源',
+  processes: '进程',
+  network: '网络与磁盘',
+  services: '服务',
+  device: '设备',
+  sensors: '传感器'
+};
 
-/* ---------------- 小工具 ---------------- */
+var state = { paused: false, tick: 0, page: null, pageTimer: null };
+
+/* ---------------- 小工具（页面模块全局可用） ---------------- */
 
 function esc(value) {
   return String(value === null || value === undefined ? '' : value)
@@ -87,233 +88,6 @@ function setLive(text, mode) {
   document.getElementById('live-text').textContent = text;
 }
 
-/* ---------------- 构建上半部分 ---------------- */
-
-function buildUpper() {
-  var upper = document.getElementById('upper');
-
-  METRICS.forEach(function (spec) {
-    var row = document.createElement('div');
-    row.className = 'metric';
-
-    var body = document.createElement('div');
-    body.className = 'metric-body';
-
-    var label = document.createElement('div');
-    label.className = 'metric-label';
-    if (spec.hex) {
-      var tick = document.createElement('span');
-      tick.className = 'tick';
-      tick.style.background = spec.hex;
-      label.appendChild(tick);
-    }
-    label.appendChild(document.createTextNode(spec.label));
-    body.appendChild(label);
-
-    if (spec.key === 'net') {
-      var wrap = document.createElement('div');
-      wrap.className = 'net-values';
-      [['down', '下载', '#3ddc97'], ['up', '上传', '#ff6b9d']].forEach(function (item) {
-        var line = document.createElement('div');
-        line.className = 'net-line';
-        var mark = document.createElement('span');
-        mark.className = 'tick';
-        mark.style.background = item[2];
-        var val = document.createElement('b');
-        val.id = 'v-net-' + item[0];
-        val.textContent = '—';
-        line.appendChild(mark);
-        line.appendChild(document.createTextNode(item[1]));
-        line.appendChild(val);
-        wrap.appendChild(line);
-      });
-      body.appendChild(wrap);
-    } else {
-      var value = document.createElement('div');
-      value.className = 'metric-value';
-      value.id = 'v-' + spec.key;
-      value.textContent = '—';
-      body.appendChild(value);
-    }
-
-    var sub = document.createElement('div');
-    sub.className = 'metric-sub';
-    sub.id = 's-' + spec.key;
-    body.appendChild(sub);
-
-    var chartHost = document.createElement('div');
-    chartHost.className = 'metric-chart';
-    chartHost.id = 'c-' + spec.key;
-    var tag = document.createElement('span');
-    tag.className = 'range-tag';
-    tag.id = 'range-' + spec.key;
-    chartHost.appendChild(tag);
-
-    if (spec.bar) {
-      var track = document.createElement('div');
-      track.className = 'bar-track';
-      var fill = document.createElement('div');
-      fill.className = 'bar-fill';
-      fill.id = 'bar-disk';
-      track.appendChild(fill);
-      chartHost.appendChild(track);
-      state.charts[spec.key] = { spec: spec, chart: null };
-    } else {
-      var chart = window.createChart(chartHost, {
-        series: spec.series,
-        fixed: spec.fixed || null,
-        autoMinTop: spec.autoMinTop || 1,
-        window: WINDOW_SECONDS
-      });
-      state.charts[spec.key] = { spec: spec, chart: chart, naReason: null };
-    }
-
-    row.appendChild(body);
-    row.appendChild(chartHost);
-    upper.appendChild(row);
-  });
-}
-
-/* ---------------- 渲染 ---------------- */
-
-function markUnavailable(key, reason) {
-  var inst = state.charts[key];
-  var value = document.getElementById('v-' + key);
-  if (value) {
-    value.classList.add('na');
-    value.textContent = '不可用';
-  }
-  /* 有曲线区的指标把原因显示在图表位置，避免和副标题重复；磁盘这种没有曲线区的则写在副标题 */
-  var hasChart = !!(inst && inst.chart);
-  setSub('s-' + key, hasChart ? '' : (reason || ''));
-  var tag = document.getElementById('range-' + key);
-  if (tag) tag.textContent = '';
-  if (hasChart && inst.naReason !== reason) {
-    inst.chart.setUnavailable(reason);
-    inst.naReason = reason;
-  }
-}
-
-function renderMetrics(ov) {
-  var cpu = ov.cpu;
-  if (cpu.available) {
-    setValue('v-cpu', cpu.percent.toFixed(0), '%');
-    setSub('s-cpu', ov.cores + ' 核' + (cpu.freq_mhz ? ' · ' + cpu.freq_mhz + ' MHz' : ''));
-  } else {
-    markUnavailable('cpu', cpu.reason);
-  }
-
-  var mem = ov.memory;
-  if (mem.available) {
-    setValue('v-mem', mem.used_gb.toFixed(1), '/ ' + mem.total_gb.toFixed(1) + ' GB');
-    setSub('s-mem', '已用 ' + mem.percent + '% · 交换 ' + mem.swap_used_gb.toFixed(1) + ' GB');
-    state.charts.mem.chart.setFixed([0, mem.total_gb]);
-  } else {
-    markUnavailable('mem', mem.reason);
-  }
-
-  var power = ov.power;
-  if (power.available) {
-    setValue('v-power', power.watts.toFixed(1), 'W');
-    setSub('s-power', 'Intel RAPL 整机功耗');
-  } else {
-    markUnavailable('power', power.reason);
-    setSub('s-power', power.reason.indexOf('root') >= 0 ? '以 root 运行可显示' : '');
-  }
-
-  var net = ov.net;
-  if (net.available) {
-    document.getElementById('v-net-down').textContent = fmtRate(net.down_bps);
-    document.getElementById('v-net-up').textContent = fmtRate(net.up_bps);
-    setSub('s-net', '网卡 ' + net.nic);
-  } else {
-    document.getElementById('v-net-down').textContent = '不可用';
-    document.getElementById('v-net-up').textContent = '—';
-    setSub('s-net', net.reason);
-  }
-
-  var disk = ov.disk;
-  if (disk.available) {
-    setValue('v-disk', disk.free_gb.toFixed(disk.free_gb >= 100 ? 0 : 1),
-      '/ ' + disk.total_gb.toFixed(0) + ' GB');
-    setSub('s-disk', '挂载 ' + disk.path + ' · 已用 ' + disk.used_percent + '%');
-    document.getElementById('bar-disk').style.width = disk.used_percent + '%';
-    var diskTag = document.getElementById('range-disk');
-    if (diskTag) diskTag.textContent = '已用 ' + disk.used_percent + '%';
-  } else {
-    markUnavailable('disk', disk.reason);
-  }
-
-  var temp = ov.temp;
-  setNav('nav-temp', temp.available ? temp.celsius.toFixed(0) + '°C' : '—');
-  setNav('nav-sensor', temp.available ? temp.celsius.toFixed(0) + '°' : '—');
-  setNav('nav-cpu', cpu.available ? cpu.percent.toFixed(0) + '%' : '—');
-  setNav('nav-proc', ov.process_count || 0);
-  setNav('nav-net', net.available ? '↓ ' + fmtRate(net.down_bps) : '—');
-  setNav('nav-dev', disk.available ? disk.used_percent + '%' : '—');
-
-  var docker = (ov.services || []).filter(function (item) { return item.name === 'Docker'; })[0];
-  setNav('nav-svc', docker ? docker.detail : '—');
-
-  document.getElementById('host').textContent = ov.host || '总控台';
-  document.getElementById('uptime').textContent = fmtUptime(ov.uptime_s);
-}
-
-function renderProcesses(list, count) {
-  var host = document.getElementById('procs');
-  document.getElementById('proc-note').textContent = count ? '共 ' + count + ' 个进程' : '';
-  if (!list || !list.length) {
-    host.innerHTML = '<div class="empty">暂无数据</div>';
-    return;
-  }
-  host.innerHTML = list.map(function (proc) {
-    return '<div class="row">' +
-      '<span class="name">' + esc(proc.name) + '</span>' +
-      '<span class="num">' + proc.cpu.toFixed(1) + '%</span>' +
-      '<span class="num rss">' + fmtMB(proc.rss_mb) + '</span>' +
-      '</div>';
-  }).join('');
-}
-
-function renderServices(list) {
-  var host = document.getElementById('services');
-  if (!list || !list.length) {
-    host.innerHTML = '<div class="empty">暂无数据</div>';
-    return;
-  }
-  var html = '';
-  var group = null;
-  list.forEach(function (item) {
-    if (item.group !== group) {
-      group = item.group;
-      html += '<div class="group-title"><span>' + esc(group) + '</span><span>' +
-        esc(item.groupNote || '') + '</span></div>';
-    }
-    html += '<div class="row">' +
-      '<span class="dot-s ' + esc(item.status) + '"></span>' +
-      '<span class="name">' + esc(item.name) + '</span>' +
-      '<span class="svc-detail">' + esc(item.detail) + '</span>' +
-      '</div>';
-  });
-  host.innerHTML = html;
-}
-
-function updateRange(spec, peak, ov) {
-  var tag = document.getElementById('range-' + spec.key);
-  if (!tag) return;
-  if (spec.key === 'cpu') {
-    tag.textContent = '100%';
-  } else if (spec.key === 'mem') {
-    tag.textContent = ov.memory.available ? ov.memory.total_gb.toFixed(1) + ' GB' : '';
-  } else if (spec.key === 'power') {
-    tag.textContent = ov.power.available ? '峰值 ' + peak.toFixed(1) + ' W' : '';
-  } else if (spec.key === 'net') {
-    tag.textContent = peak > 0 ? '峰值 ' + fmtRate(peak) : '';
-  }
-}
-
-/* ---------------- 轮询 ---------------- */
-
 function fetchJSON(url) {
   return fetch(url, { cache: 'no-store' }).then(function (res) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -321,46 +95,103 @@ function fetchJSON(url) {
   });
 }
 
-function tick() {
-  if (state.paused) return Promise.resolve();
-  /* 手机上切后台/锁屏时跳过轮询，省电省流量；但首次渲染必须执行，
-     否则在后台标签页里打开会一直白屏。回前台由 visibilitychange 立即补一次。 */
-  if (document.hidden && state.tick > 0) return Promise.resolve();
+/* 页面轮询前的统一闸门：暂停或后台时跳过（首次渲染除外）。 */
+function pollGuard() {
+  if (state.paused) return true;
+  if (document.hidden && state.tick > 0) return true;
+  return false;
+}
 
-  return fetchJSON('/api/overview').then(function (ov) {
-    if (!ov.ready) return null;
-    setLive('实时更新中', '');
-    renderMetrics(ov);
-    renderProcesses(ov.processes, ov.process_count);
-    if (state.tick % 2 === 0) renderServices(ov.services);
+/* ---------------- 徽章轮询：让侧栏数值在任何页面都保持最新 ---------------- */
 
-    var url = state.lastSeriesTs > 0
-      ? '/api/series?since=' + state.lastSeriesTs
-      : '/api/series';
+function updateBadges(ov) {
+  var temp = ov.temp, cpu = ov.cpu, net = ov.net, disk = ov.disk;
+  setNav('nav-temp', temp && temp.available ? temp.celsius.toFixed(0) + '°C' : '—');
+  setNav('nav-sensor', temp && temp.available ? temp.celsius.toFixed(0) + '°' : '—');
+  setNav('nav-cpu', cpu && cpu.available ? cpu.percent.toFixed(0) + '%' : '—');
+  setNav('nav-proc', ov.process_count || 0);
+  setNav('nav-net', net && net.available ? '↓ ' + fmtRate(net.down_bps) : '—');
+  setNav('nav-dev', disk && disk.available ? disk.used_percent + '%' : '—');
 
-    return fetchJSON(url).then(function (data) {
-      var series = data.series || {};
-      if (data.ts) state.lastSeriesTs = data.ts;
-      Object.keys(state.charts).forEach(function (name) {
-        var inst = state.charts[name];
-        if (!inst.chart) return;
-        inst.spec.series.forEach(function (spec) {
-          var pts = series[spec.key];
-          if (pts && pts.length) inst.chart.append(spec.key, pts);
-        });
-        var peak = inst.chart.redraw(data.ts);
-        updateRange(inst.spec, peak, ov);
-      });
-      state.tick++;
-    });
-  }).catch(function () {
-    setLive('连接中断，重试中…', 'error');
-  });
+  var docker = (ov.services || []).filter(function (item) {
+    return item.name === 'Docker';
+  })[0];
+  setNav('nav-svc', docker ? docker.detail : '—');
+
+  document.getElementById('host').textContent = ov.host || '总控台';
+  document.getElementById('uptime').textContent = fmtUptime(ov.uptime_s);
+}
+
+function pollBadges() {
+  var page = DashPages[state.page];
+  if (page && page.badges === false) return;  // 概览页自己全量刷新并更新徽章
+  if (state.paused || document.hidden) return;
+  fetchJSON('/api/overview').then(function (ov) {
+    if (ov.ready) updateBadges(ov);
+  }).catch(function () { /* 连接状态由当前页面的 tick 负责 */ });
+}
+
+/* ---------------- hash 路由 ---------------- */
+
+function currentPageId() {
+  var hash = (location.hash || '').replace(/^#\/?/, '').replace(/\/+$/, '');
+  return hash || 'overview';
+}
+
+function navigate() {
+  var id = currentPageId();
+  if (state.page === id) return;
+  activate(id);
+}
+
+function activate(id) {
+  if (state.pageTimer) { clearInterval(state.pageTimer); state.pageTimer = null; }
+  state.page = id;
+  state.tick = 0;
+
+  var host = document.getElementById('page-host');
+  host.innerHTML = '';
+
+  var items = document.querySelectorAll('.nav-item');
+  for (var i = 0; i < items.length; i++) {
+    items[i].classList.toggle('active', items[i].getAttribute('data-page') === id);
+  }
+  document.title = (PAGE_TITLES[id] || id) + ' · 总控台';
+
+  if (DashPages[id]) return mountPage(id, host);
+
+  /* 按需加载页面模块；404 或未注册则显示建设中 */
+  var script = document.createElement('script');
+  script.src = '/static/pages/' + id + '.js';
+  script.onload = function () {
+    if (state.page !== id) return;  // 用户已切到别的页面
+    if (DashPages[id]) mountPage(id, host);
+    else renderPlaceholder(host, id);
+  };
+  script.onerror = function () {
+    if (state.page === id) renderPlaceholder(host, id);
+  };
+  document.head.appendChild(script);
+}
+
+function mountPage(id, host) {
+  var page = DashPages[id];
+  if (page.title) document.title = page.title + ' · 总控台';
+  page.mount(host);
+  var run = function () { page.tick(); };
+  run();
+  state.pageTimer = setInterval(run, page.interval || 1000);
+}
+
+function renderPlaceholder(host, id) {
+  host.innerHTML =
+    '<section class="card coming">' +
+    '<div class="card-head"><span>' + esc(PAGE_TITLES[id] || id) + '</span>' +
+    '<span class="head-note">建设中</span></div>' +
+    '<div class="card-body"><div class="empty">这一页在后续批次上线。</div></div></section>';
 }
 
 /* ---------------- 启动 ---------------- */
-
-buildUpper();
 
 document.getElementById('pause').addEventListener('click', function () {
   state.paused = !state.paused;
@@ -369,7 +200,9 @@ document.getElementById('pause').addEventListener('click', function () {
     setLive('已暂停', 'paused');
   } else {
     setLive('实时更新中', '');
-    tick();
+    var page = DashPages[state.page];
+    if (page) page.tick();
+    pollBadges();
   }
 });
 
@@ -378,9 +211,14 @@ setInterval(function () {
 }, 1000);
 document.getElementById('clock').textContent = fmtClock(new Date());
 
-tick();
-setInterval(tick, 1000);
+window.addEventListener('hashchange', navigate);
+navigate();
+setInterval(pollBadges, 2000);
+pollBadges();
 
 document.addEventListener('visibilitychange', function () {
-  if (!document.hidden && !state.paused) tick();
+  if (document.hidden || state.paused) return;
+  var page = DashPages[state.page];
+  if (page) page.tick();
+  pollBadges();
 });

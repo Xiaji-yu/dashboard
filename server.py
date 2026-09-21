@@ -2,10 +2,12 @@
 """8282 总控台：零依赖 HTTP 服务（Python 标准库 + psutil）。
 
 路由：
-  GET /                      概览页
+  GET /                      单页应用入口（前端 hash 路由切换页面）
   GET /static/*              前端资源
   GET /api/overview          瞬时快照：指标 + 最忙进程 + 服务状态
+  GET /api/performance       性能与电源：每核占用、温度、风扇、GPU、电池、内存构成
   GET /api/series?since=TS   曲线数据；省略 since 返回整个时间窗口
+  GET /api/series?keys=a,b   只返回指定曲线键（未知键返回 400）
 
 环境变量：
   DASHBOARD_HOST  监听地址，默认 0.0.0.0
@@ -21,6 +23,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import re
 import socket
 import threading
 import time
@@ -39,8 +42,40 @@ INTERVAL = float(os.environ.get("DASHBOARD_INTERVAL", "1.0"))
 # 曲线序列：键 -> 取自快照的哪个字段
 SERIES_KEYS = ("cpu", "mem_used", "power", "net_down", "net_up", "disk_free", "temp")
 
+# 性能页额外序列（从快照 performance 段提取，见 performance_series）与每核键的白名单
+PERF_SERIES_KEYS = ("fan_cpu", "gpu_mhz", "temp_acpi")
+PERCORE_KEY_RE = re.compile(r"cpu\d{1,2}")
+
 state_lock = threading.Lock()
 state = {"snapshot": None, "history": History(), "series_ts": 0.0}
+
+
+def valid_series_key(key):
+    return key in SERIES_KEYS or key in PERF_SERIES_KEYS or bool(PERCORE_KEY_RE.fullmatch(key))
+
+
+def performance_series(snapshot):
+    """从快照 performance 段提取性能页曲线序列；该段缺失时返回空。"""
+    perf = snapshot.get("performance") or {}
+    out = {}
+    cores = (perf.get("cpu") or {}).get("per_core") or {}
+    if cores.get("available"):
+        for index, percent in enumerate(cores.get("per_cpu") or ()):
+            out[f"cpu{index}"] = percent
+    fans = perf.get("fans") or {}
+    if fans.get("available"):
+        for fan in fans["list"]:
+            if fan["key"] == "cpu_fan":
+                out["fan_cpu"] = fan["rpm"]
+    gpu = perf.get("gpu") or {}
+    if gpu.get("available"):
+        out["gpu_mhz"] = gpu["freq_mhz"]
+    temps = perf.get("temps") or {}
+    if temps.get("available"):
+        for entry in temps["list"]:
+            if entry["key"] == "acpi":
+                out["temp_acpi"] = entry["celsius"]
+    return out
 
 
 def series_values(snapshot):
@@ -75,6 +110,8 @@ def sampler(collector):
                 state["series_ts"] = snapshot["ts"]
                 for key, value in series_values(snapshot).items():
                     state["history"].append(key, snapshot["ts"], value)
+                for key, value in performance_series(snapshot).items():
+                    state["history"].append(key, snapshot["ts"], value)
         except Exception as exc:  # 采集异常不应终止采样
             print(f"[collector] 采样失败：{exc}", flush=True)
         time.sleep(max(0.05, INTERVAL - (time.time() - started)))
@@ -92,13 +129,24 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
         if path == "/api/overview":
             return self._send_json(self._overview())
+        if path == "/api/performance":
+            return self._send_json(self._performance())
         if path == "/api/series":
-            raw = parse_qs(parsed.query).get("since", ["0"])[0]
+            query = parse_qs(parsed.query)
+            raw = query.get("since", ["0"])[0]
             try:
                 since_ts = float(raw)
             except ValueError:
                 since_ts = 0.0
-            return self._send_json(self._series(since_ts))
+            keys = None
+            raw_keys = query.get("keys", [""])[0]
+            if raw_keys:
+                keys = [item.strip() for item in raw_keys.split(",") if item.strip()]
+                unknown = [item for item in keys if not valid_series_key(item)]
+                if unknown:
+                    return self.send_error(400, f"unknown series keys: {', '.join(unknown)}")
+                keys = keys or None
+            return self._send_json(self._series(since_ts, keys))
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(STATIC_DIR, "index.html"))
         if path.startswith("/static/"):
@@ -123,15 +171,27 @@ class Handler(BaseHTTPRequestHandler):
         payload["services"] = self.collector.services()
         return payload
 
+    def _performance(self):
+        with state_lock:
+            snapshot = state["snapshot"]
+        if snapshot is None:
+            return {"ready": False, "window": WINDOW_SECONDS}
+        payload = dict(snapshot.get("performance") or {})
+        payload["ready"] = True
+        payload["ts"] = snapshot["ts"]
+        payload["window"] = WINDOW_SECONDS
+        return payload
+
     @staticmethod
-    def _series(since_ts):
+    def _series(since_ts, keys=None):
+        selected = keys if keys else SERIES_KEYS
         with state_lock:
             history = state["history"]
             ts = state["series_ts"]
         if since_ts <= 0:
-            series = {key: history.window(key) for key in SERIES_KEYS}
+            series = {key: history.window(key) for key in selected}
         else:
-            series = {key: history.since(key, since_ts) for key in SERIES_KEYS}
+            series = {key: history.since(key, since_ts) for key in selected}
         return {"ts": ts, "window": WINDOW_SECONDS, "series": series}
 
     # ---------------- 响应 ----------------
