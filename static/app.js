@@ -323,6 +323,9 @@ function fetchJSON(url) {
 
 function tick() {
   if (state.paused) return Promise.resolve();
+  /* 手机上切后台/锁屏时跳过轮询，省电省流量；但首次渲染必须执行，
+     否则在后台标签页里打开会一直白屏。回前台由 visibilitychange 立即补一次。 */
+  if (document.hidden && state.tick > 0) return Promise.resolve();
 
   return fetchJSON('/api/overview').then(function (ov) {
     if (!ov.ready) return null;
@@ -377,3 +380,7 @@ document.getElementById('clock').textContent = fmtClock(new Date());
 
 tick();
 setInterval(tick, 1000);
+
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && !state.paused) tick();
+});

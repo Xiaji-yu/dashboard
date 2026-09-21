@@ -16,6 +16,9 @@ htmlcov/
 server.log
 server.pid
 
+# 本地验证截图
+.shots/
+
 # 编辑器与系统
 .idea/
 .vscode/
