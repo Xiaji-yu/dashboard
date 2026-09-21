@@ -148,6 +148,7 @@ function activate(id) {
   if (state.pageTimer) { clearInterval(state.pageTimer); state.pageTimer = null; }
   state.page = id;
   state.tick = 0;
+  document.body.dataset.page = id;  /* CSS 按页面切换布局（概览铺满视口，其余自然高度） */
 
   var host = document.getElementById('page-host');
   host.innerHTML = '';

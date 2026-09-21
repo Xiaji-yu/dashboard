@@ -519,6 +519,36 @@ body {
 
 /* ---------------- 性能与电源页 ---------------- */
 
+/* 数据密集的页面桌面端也改为自然高度、整页滚动；概览页保持铺满视口 */
+@media (min-width: 901px) {
+  body:not([data-page="overview"]) .app {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+}
+
+.perf-upper, .perf-lower { flex: none; }
+
+/* 处理器卡：超出可见数的线程折叠隐藏 */
+.core-row.is-hidden { display: none; }
+
+.core-toggle {
+  margin-top: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.core-toggle:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.09);
+}
+
 /* 处理器卡片：每线程一条占用条 */
 .core-row {
   display: flex;

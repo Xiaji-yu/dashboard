@@ -32,6 +32,9 @@
   var lastSeriesTs = 0;
   var gpuMax = 1100;
   var threadsBuilt = 0;
+  var VISIBLE_CORES = 4;  /* 超过这个数折叠到「展开其余 N 线程」按钮后面 */
+  var coresExpanded = false;
+  var coreCount = 0;
 
   /* ---------------- 构建 ---------------- */
 
@@ -115,18 +118,48 @@
   }
 
   function buildCoreRows(count) {
+    coreCount = count;
+    coresExpanded = false;
     var host = document.getElementById('core-rows');
     var html = '';
     for (var i = 0; i < count; i++) {
-      html += '<div class="core-row">' +
+      html += '<div class="core-row' + (i >= VISIBLE_CORES ? ' is-hidden' : '') + '">' +
         '<span class="name">线程 ' + i + '</span>' +
         '<span class="meter" id="meter-core-' + i + '"><i></i></span>' +
         '<span class="pct" id="pct-core-' + i + '">—</span>' +
         '<span class="freq" id="freq-core-' + i + '">—</span>' +
         '</div>';
     }
+    if (count > VISIBLE_CORES) {
+      html += '<button class="core-toggle" id="core-toggle" type="button"></button>';
+    }
     host.innerHTML = html;
+    updateCoreVisibility();
+    updateCoreToggle();
+    var button = document.getElementById('core-toggle');
+    if (button) {
+      button.addEventListener('click', function () {
+        coresExpanded = !coresExpanded;
+        updateCoreVisibility();
+        updateCoreToggle();
+      });
+    }
     threadsBuilt = count;
+  }
+
+  function updateCoreVisibility() {
+    var rows = document.querySelectorAll('#core-rows .core-row');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle('is-hidden', !coresExpanded && i >= VISIBLE_CORES);
+    }
+  }
+
+  function updateCoreToggle() {
+    var button = document.getElementById('core-toggle');
+    if (!button) return;
+    button.textContent = coresExpanded
+      ? '收起，只显示前 ' + VISIBLE_CORES + ' 个线程 ▴'
+      : '展开其余 ' + (coreCount - VISIBLE_CORES) + ' 个线程 ▾';
   }
 
   function buildPowerRows() {
@@ -182,6 +215,7 @@
       }).length;
       setSub('s-cores', (physical || list.length) + ' 核 ' + list.length + ' 线程');
       if (threadsBuilt !== list.length) buildCoreRows(list.length);
+      else updateCoreVisibility();
       list.forEach(function (percent, index) {
         var meter = document.getElementById('meter-core-' + index);
         if (meter) {
@@ -196,7 +230,8 @@
             ? cores.freq_mhz[index] + ' MHz' : '—';
         }
       });
-      document.getElementById('core-note').textContent = '2 秒内刷新';
+      document.getElementById('core-note').textContent =
+        '共 ' + list.length + ' 线程 · 2 秒内刷新';
     } else if (!cores.available) {
       setSub('s-cores', cores.reason || '不可用');
     }
@@ -367,6 +402,7 @@
       charts = {};
       lastSeriesTs = 0;
       threadsBuilt = 0;
+      coresExpanded = false;
       build(host);
       buildPowerRows();
     },
