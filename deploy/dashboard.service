@@ -1,0 +1,50 @@
+# 8282 总控台 —— systemd 服务单元
+#
+# 安装（把路径与用户名改成你自己的）：
+#   sudo cp deploy/dashboard.service /etc/systemd/system/dashboard.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now dashboard
+#   systemctl status dashboard          # 看状态
+#   journalctl -u dashboard -f          # 看日志
+#
+# 为什么不用 root 跑这个服务：
+#   看板监听 0.0.0.0 且没有鉴权，把整个进程交给 root 风险太大。
+#   功耗计数器（RAPL）只有 root 可读，所以下面用 ExecStartPre 在启动时单独放开读权限，
+#   服务进程本身仍是普通用户。若你的内核不允许 chmod sysfs，改用 deploy/60-dashboard-rapl.rules。
+
+[Unit]
+Description=8282 总控台（本机实时监控看板）
+Documentation=https://github.com/Xiaji-yu/dashboard
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ↓↓↓ 这两行必须按实际情况改 ↓↓↓
+User=xiaji
+WorkingDirectory=/home/xiaji/code/dashboard
+
+Environment=DASHBOARD_HOST=0.0.0.0
+Environment=DASHBOARD_PORT=8282
+Environment=DASHBOARD_INTERVAL=1.0
+# 需要固定网卡/磁盘时再打开：
+# Environment=DASHBOARD_NIC=enx000ec6c87fb8
+# Environment=DASHBOARD_DISK=/
+
+# 以 root 身份放开 RAPL 功耗计数器的读权限（只在每次启动时执行一次）。
+# 读不到就静默跳过，不影响服务启动。
+ExecStartPre=+/bin/sh -c 'chmod 0444 /sys/class/powercap/intel-rapl*/energy_uj 2>/dev/null || true'
+
+ExecStart=/usr/bin/python3 /home/xiaji/code/dashboard/server.py
+
+Restart=always
+RestartSec=3
+
+# 基本加固：看板只读系统指标，不需要改系统文件
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -73,7 +73,7 @@
         '<div class="card-head"><span>功耗与风扇</span>' +
         '<span class="head-note" id="power-note"></span></div>' +
         '<div class="card-body">' +
-          '<div class="big-value"><span id="v-fan">—</span></div>' +
+          '<div class="big-value"><span id="v-power">—</span></div>' +
           '<div class="kv-rows" id="power-rows"></div>' +
           '<div class="mini-chart" id="c-fan"></div>' +
         '</div>' +
@@ -105,12 +105,7 @@
       autoMinTop: 600, window: WINDOW_SECONDS
     });
 
-    document.getElementById('power-rows').innerHTML =
-      '<div class="kv-row"><span>整机功耗</span><b id="pw-rapl">—</b></div>' +
-      '<div class="kv-row"><span>电池</span><b id="pw-batt">—</b></div>' +
-      '<div class="kv-row"><span>循环次数</span><b id="pw-cycles">—</b></div>' +
-      '<div class="kv-row"><span>其他风扇</span><b id="pw-gpufan">—</b></div>' +
-      '<div class="kv-row"><span>负载 1/5/15</span><b id="pw-load">—</b></div>';
+    document.getElementById('power-rows').innerHTML = '';
   }
 
   /* ---------------- 核心分组（按物理核，对应参考图的能效/性能核分组） ---------------- */
@@ -242,55 +237,63 @@
     document.getElementById('temp-note').textContent = list.length + ' 路传感器';
   }
 
+  function kvRow(label, value) {
+    return '<div class="kv-row"><span>' + esc(label) + '</span><b>' + esc(value) + '</b></div>';
+  }
+
   function renderPower(perf) {
+    var power = perf.power || {};
     var fans = perf.fans || {};
     var list = (fans.available && fans.list) || [];
     var cpuFan = list.filter(function (item) { return item.key === 'cpu_fan'; })[0] || list[0];
-    if (cpuFan) {
-      setValue('v-fan', cpuFan.rpm, 'RPM');
-    } else {
-      var fanNode = document.getElementById('v-fan');
-      fanNode.classList.add('na');
-      fanNode.textContent = '不可用';
-    }
-    document.getElementById('power-note').textContent =
-      fans.available ? '' : (fans.reason || '');
+    var note = document.getElementById('power-note');
+    var valueNode = document.getElementById('v-power');
+    valueNode.classList.remove('na');
 
-    var power = perf.power || {};
-    document.getElementById('pw-rapl').textContent =
-      power.available ? power.watts.toFixed(1) + ' W' : '不可用';
-    if (!power.available && power.reason) {
-      /* 原因太长会挤坏窄卡的行，放到头注里 */
-      document.getElementById('power-note').textContent = power.reason;
+    /* 大数字：RAPL 可读时显示功耗瓦数（与参考图一致），不可读时退化为风扇转速 */
+    if (power.available) {
+      setValue('v-power', power.watts.toFixed(1), 'W');
+      note.textContent = (power.source || 'RAPL') + ' · Intel RAPL';
+    } else if (cpuFan) {
+      setValue('v-power', cpuFan.rpm, 'RPM');
+      note.textContent = power.reason || '';
+    } else {
+      valueNode.classList.add('na');
+      valueNode.textContent = '不可用';
+      note.textContent = power.reason || fans.reason || '';
     }
+
+    var rows = [];
+    /* 功耗构成：主值已是大数字，其余域列成明细（参考图里的「GPU / CPU 等」那种分解） */
+    (power.domains || []).slice(1).forEach(function (domain) {
+      rows.push(kvRow(domain.label, domain.watts.toFixed(2) + ' W'));
+    });
 
     var batt = perf.battery || {};
-    var battText;
-    var cyclesText = '—';
     if (batt.available) {
       var status = BATT_STATUS[batt.status] || (batt.plugged ? '已接通电源' : '放电中');
       var bits = [batt.percent.toFixed(1) + '%', status];
       if (batt.power_w) bits.push(batt.power_w.toFixed(1) + ' W');
       if (batt.secsleft) bits.push('剩 ' + fmtUptime(batt.secsleft));
-      battText = bits.join(' · ');
-      cyclesText = batt.cycles ? batt.cycles + ' 次' : '—';
+      rows.push(kvRow('电池', bits.join(' · ')));
+      rows.push(kvRow('循环次数', batt.cycles ? batt.cycles + ' 次' : '—'));
     } else {
-      battText = batt.reason || '不可用';
+      rows.push(kvRow('电池', batt.reason || '不可用'));
     }
-    document.getElementById('pw-batt').textContent = battText;
-    document.getElementById('pw-cycles').textContent = cyclesText;
 
-    var gpuFan = list.filter(function (item) { return item.key !== 'cpu_fan'; });
-    document.getElementById('pw-gpufan').textContent = gpuFan.length
-      ? gpuFan.map(function (item) {
+    var otherFans = list.filter(function (item) { return item !== cpuFan; });
+    rows.push(kvRow('其他风扇', otherFans.length
+      ? otherFans.map(function (item) {
           return item.label + ' ' + item.rpm + ' RPM' + (item.rpm === 0 ? '（停转）' : '');
         }).join(' · ')
-      : '—';
+      : '—'));
 
     var load = perf.load || {};
-    document.getElementById('pw-load').textContent = load.available
+    rows.push(kvRow('负载 1/5/15', load.available
       ? load.avg1 + ' / ' + load.avg5 + ' / ' + load.avg15
-      : (load.reason || '—');
+      : (load.reason || '—')));
+
+    document.getElementById('power-rows').innerHTML = rows.join('');
   }
 
   function renderMemory(mem) {

@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **RAPL 功耗改为多域采集**：枚举 `powercap` 下所有域（psys 平台 / package-0 封装 / core 核心 /
+  uncore 核显与内存控制器 / dram 内存），逐域算差分瓦数；主值优先 `psys`（最接近整机），
+  性能页的功耗卡显示主值瓦数 + 其余域明细（对应参考图的功耗构成分解）。
+- 新增 `deploy/dashboard.service`（systemd 单元，刻意不以 root 运行，用 `ExecStartPre`
+  单独放开 RAPL 读权限）与 `deploy/60-dashboard-rapl.rules`（udev 备选方案），
+  README 增加「部署到 systemd」章节。
+- 采集层新增 `DASHBOARD_RAPL_DIR` 环境变量，可把 RAPL 根目录指到夹具目录，便于测试。
+
 ### 变更
 
 - **「性能与电源」页按参考图版式重做**：上半部分一张大卡（左列大数字 + 按物理核心分组的占用条 +

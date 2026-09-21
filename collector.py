@@ -20,14 +20,27 @@ VIRTUAL_NIC_PREFIXES = (
     "lo", "docker", "br-", "veth", "virbr", "tun", "tap", "wg", "zt",
     "vmnet", "vboxnet", "snap", "dummy",
 )
-# Intel RAPL 整机功耗计数器（读 energy_uj 需要 root，通常不可用）
-RAPL_ENERGY = "/sys/class/powercap/intel-rapl:0/energy_uj"
+# Intel RAPL 功耗计数器（energy_uj 默认 root 只读，见 README「功耗与 systemd」）
+RAPL_DIR_DEFAULT = "/sys/class/powercap"
+# 域名的展示名；psys 是平台级，最接近「整机功耗」
+RAPL_LABELS = {
+    "psys": "平台功耗",
+    "package-0": "CPU 封装",
+    "core": "CPU 核心",
+    "uncore": "核显与内存控制器",
+    "dram": "内存",
+}
 SERVICES_TTL = 5.0
 GIB = 1024.0 ** 3
 MIB = 1024.0 ** 2
 
 # 风扇 key 的中文命名，其余 key 直接展示原始 label
 FAN_LABELS = {"cpu_fan": "CPU 风扇", "gpu_fan": "GPU 风扇", "fan1": "机箱风扇"}
+
+
+def rapl_dir():
+    """RAPL 根目录。环境变量可覆盖，便于测试时指向夹具目录。"""
+    return os.environ.get("DASHBOARD_RAPL_DIR", RAPL_DIR_DEFAULT)
 
 
 def is_virtual_nic(name):
@@ -133,8 +146,9 @@ class Collector:
         self.cores = psutil.cpu_count(logical=True) or 1
         self.boot_time = psutil.boot_time()
         self._net_prev = None
-        self._rapl_prev = None
+        self._rapl_prev = {}
         self._rapl_note = None
+        self._rapl_domains = None
         self._procs = {}
         self._services = None
         self._services_at = 0.0
@@ -296,34 +310,86 @@ class Collector:
             "swap_used_gb": round(swap.used / GIB, 1),
         }
 
+    def _rapl_paths(self):
+        """枚举 powercap 下的 RAPL 域：name 文件给展示名，energy_uj 是累计能量（微焦）。"""
+        if self._rapl_domains is not None:
+            return self._rapl_domains
+        domains = []
+        try:
+            entries = sorted(os.listdir(rapl_dir()))
+        except OSError:
+            entries = []
+        for entry in entries:
+            base = os.path.join(rapl_dir(), entry)
+            energy = os.path.join(base, "energy_uj")
+            try:
+                if not os.path.exists(energy):
+                    continue
+            except OSError:
+                continue
+            name = self._read_sys(os.path.join(base, "name")) or entry
+            domains.append((name, energy))
+        self._rapl_domains = domains
+        return domains
+
     def _power(self, now):
-        """整机功耗：Intel RAPL 能量计数器差分。energy_uj 通常仅 root 可读。"""
+        """功耗：逐域读取 RAPL 累计能量做差分。
+
+        psys（平台）优先作为主值，退化到 package-0；同时给出各域明细，
+        供性能页画参考图那样的功耗构成。
+        """
         if self._rapl_note:
             return {"available": False, "reason": self._rapl_note}
-        try:
-            with open(RAPL_ENERGY, "r") as handle:
-                energy = int(handle.read().strip())
-        except FileNotFoundError:
+        domains = self._rapl_paths()
+        if not domains:
             self._rapl_note = "本机没有 Intel RAPL 功耗计数器"
             return {"available": False, "reason": self._rapl_note}
-        except PermissionError:
-            self._rapl_note = "读取 RAPL 需要 root 权限"
-            return {"available": False, "reason": self._rapl_note}
-        except (OSError, ValueError) as exc:
-            self._rapl_note = f"RAPL 读取失败：{exc}"
-            return {"available": False, "reason": self._rapl_note}
 
-        watts = None
-        if self._rapl_prev is not None:
-            prev_ts, prev_energy = self._rapl_prev
-            delta_t = now - prev_ts
-            delta_e = energy - prev_energy
-            if delta_t > 0 and delta_e >= 0:  # 计数器溢出时跳过该点
-                watts = round(delta_e / 1e6 / delta_t, 2)
-        self._rapl_prev = (now, energy)
-        if watts is None:
+        readings = {}
+        for name, path in domains:
+            try:
+                with open(path, "r") as handle:
+                    readings[name] = int(handle.read().strip())
+            except PermissionError:
+                self._rapl_note = ("读取 RAPL 需要权限：以 root 运行，"
+                                   "或用 deploy 里的 udev 规则放开 energy_uj 读权限")
+                return {"available": False, "reason": self._rapl_note}
+            except FileNotFoundError:
+                self._rapl_note = "RAPL 计数器不可读"
+                return {"available": False, "reason": self._rapl_note}
+            except (OSError, ValueError) as exc:
+                self._rapl_note = f"RAPL 读取失败：{exc}"
+                return {"available": False, "reason": self._rapl_note}
+
+        watts = {}
+        for name, energy in readings.items():
+            prev = self._rapl_prev.get(name)
+            if prev is not None:
+                delta_t = now - prev[0]
+                delta_e = energy - prev[1]
+                if delta_t > 0 and delta_e >= 0:  # 计数器溢出时跳过该点
+                    watts[name] = round(delta_e / 1e6 / delta_t, 2)
+        self._rapl_prev = {name: (now, energy) for name, energy in readings.items()}
+
+        if not watts:
             return {"available": False, "reason": "正在预热功耗采样"}
-        return {"available": True, "watts": watts}
+
+        if "psys" in watts:
+            primary = "psys"
+        elif "package-0" in watts:
+            primary = "package-0"
+        else:
+            primary = max(watts, key=lambda key: watts[key])
+        detail = [
+            {"name": name, "label": RAPL_LABELS.get(name, name), "watts": watts[name]}
+            for name in sorted(watts, key=lambda key: (key != primary, key))
+        ]
+        return {
+            "available": True,
+            "watts": watts[primary],
+            "source": RAPL_LABELS.get(primary, primary),
+            "domains": detail,
+        }
 
     def _net(self, now):
         if not self.nic:

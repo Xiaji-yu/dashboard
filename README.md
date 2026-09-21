@@ -61,6 +61,47 @@ pip install -r requirements.txt
 
 `run.sh` 用 `setsid` 启动服务，脱离当前会话/进程组——关掉终端或父进程被杀都不会带走它。
 
+## 部署到 systemd（顺便解决功耗采集）
+
+仓库里带了一个可直接用的服务单元：`deploy/dashboard.service`。
+
+```bash
+sudo cp deploy/dashboard.service /etc/systemd/system/dashboard.service
+sudo editor /etc/systemd/system/dashboard.service   # 改 User= 和路径
+sudo systemctl daemon-reload
+sudo systemctl enable --now dashboard
+systemctl status dashboard
+```
+
+**关于功耗采集**：`/sys/class/powercap/intel-rapl*/energy_uj` 默认是 `0400 root root`，
+所以以普通用户运行的服务读不到，页面上会显示「不可用」。有两种开权限的方式：
+
+1. **服务单元里的 `ExecStartPre`（默认已写好，推荐）**：systemd 以 root 身份在启动时执行一次
+   `chmod 0444 /sys/class/powercap/intel-rapl*/energy_uj`，服务进程本身仍是普通用户。
+2. **udev 规则（备选）**：`deploy/60-dashboard-rapl.rules`，装好后每次设备出现都会放开读权限：
+
+   ```bash
+   sudo cp deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
+   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=powercap
+   ```
+
+   验证（普通用户，能打印数字即可）：`cat /sys/class/powercap/intel-rapl:0/energy_uj`
+
+**不建议把看板本身跑成 root**：服务监听 `0.0.0.0` 且无鉴权，一旦被访问就能拿到 root 进程的
+全部能力。上面两种方式都只把「读功耗计数器」这一件事放开。
+
+有权限后能采到的功耗域（这台 i5-7200U 的实测）：
+
+| 域 | 含义 | 角色 |
+| --- | --- | --- |
+| `psys` | 平台功耗 | 主值（最接近整机） |
+| `package-0` | CPU 封装 | 明细行 |
+| `core` | CPU 核心 | 明细行 |
+| `uncore` | 核显与内存控制器 | 明细行 |
+| `dram` | 内存 | 明细行 |
+
+没有 RAPL 权限时不会空着：性能页的功耗卡退化为显示风扇转速，概览页的功耗曲线显示「不可用」并给出原因。
+
 ## 配置
 
 全部通过环境变量，无需改代码：
@@ -167,6 +208,7 @@ dashboard/
 │   ├── app.js             # 前端核心：路由、徽章轮询、公共工具
 │   └── pages/             # 页面模块（概览、性能与电源……）按需加载
 ├── tests/                 # Python 用例 + chart.test.js（Node 前端图表用例）
+├── deploy/                # systemd 服务单元与 RAPL 权限 udev 规则
 ├── docs/
 │   ├── screenshot.png     # 本项目运行截图
 │   └── reference/         # UI 参考图（见该目录 README）

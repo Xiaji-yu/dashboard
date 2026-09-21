@@ -5,7 +5,9 @@
 """
 
 import os
+import shutil
 import socket
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
@@ -252,6 +254,90 @@ class CollectorSnapshotTest(unittest.TestCase):
             self.assertTrue(battery["reason"])
 
 
+class PowerRaplTest(unittest.TestCase):
+    """RAPL 多域采集：夹具目录驱动，不需要 root，也不依赖真实硬件。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"DASHBOARD_RAPL_DIR": self.tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.collector = self._fresh_collector()
+
+    @staticmethod
+    def _fresh_collector(root=None):
+        collector = Collector.__new__(Collector)
+        collector._rapl_prev = {}
+        collector._rapl_note = None
+        collector._rapl_domains = None
+        return collector
+
+    def write_domain(self, name, energy, index):
+        base = os.path.join(self.tmp.name, "intel-rapl:%d" % index)
+        os.makedirs(base, exist_ok=True)
+        with open(os.path.join(base, "name"), "w") as handle:
+            handle.write(name)
+        with open(os.path.join(base, "energy_uj"), "w") as handle:
+            handle.write(str(energy))
+        return os.path.join(base, "energy_uj")
+
+    def test_first_sample_warms_up(self):
+        self.write_domain("package-0", 1000000, 0)
+        result = self.collector._power(1000.0)
+        self.assertFalse(result["available"])
+        self.assertIn("预热", result["reason"])
+
+    def test_psys_is_primary_with_domain_breakdown(self):
+        self.write_domain("package-0", 1000000, 0)
+        self.write_domain("psys", 1000000, 1)
+        self.collector._power(1000.0)
+        self.write_domain("package-0", 3000000, 0)   # 2 J / 2 s = 1 W
+        self.write_domain("psys", 5000000, 1)        # 4 J / 2 s = 2 W
+        result = self.collector._power(1002.0)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["source"], "平台功耗")
+        self.assertAlmostEqual(result["watts"], 2.0, places=3)
+        self.assertEqual([item["name"] for item in result["domains"]], ["psys", "package-0"])
+        self.assertEqual(result["domains"][0]["label"], "平台功耗")
+        self.assertEqual(result["domains"][1]["label"], "CPU 封装")
+        self.assertAlmostEqual(result["domains"][1]["watts"], 1.0, places=3)
+
+    def test_falls_back_to_package_without_psys(self):
+        self.write_domain("package-0", 1000000, 0)
+        self.collector._power(1000.0)
+        self.write_domain("package-0", 2000000, 0)
+        result = self.collector._power(1001.0)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["source"], "CPU 封装")
+        self.assertAlmostEqual(result["watts"], 1.0, places=3)
+
+    def test_missing_dir_reports_no_counter(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, True)
+        with mock.patch.dict(os.environ, {"DASHBOARD_RAPL_DIR": empty}):
+            collector = self._fresh_collector()
+            result = collector._power(1000.0)
+        self.assertFalse(result["available"])
+        self.assertIn("RAPL", result["reason"])
+
+    def test_permission_denied_mentions_root(self):
+        path = self.write_domain("package-0", 1000000, 0)
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o644)
+        result = self.collector._power(1000.0)
+        self.assertFalse(result["available"])
+        self.assertIn("root", result["reason"])
+
+    def test_counter_reset_is_skipped(self):
+        self.write_domain("package-0", 5000000, 0)
+        self.collector._power(1000.0)
+        self.write_domain("package-0", 1000, 0)   # 计数器回绕：差值为负，跳过该点
+        result = self.collector._power(1001.0)
+        self.assertFalse(result["available"])
+        self.assertIn("预热", result["reason"])
+
+
 class DegradationTest(unittest.TestCase):
     """构造失败场景，确认返回的是「不可用 + 原因」而不是抛异常。"""
 
@@ -261,39 +347,10 @@ class DegradationTest(unittest.TestCase):
         collector.nic = "eth0"
         collector.cores = 4
         collector._net_prev = None
-        collector._rapl_prev = None
+        collector._rapl_prev = {}
         collector._rapl_note = None
+        collector._rapl_domains = None
         return collector
-
-    def test_power_permission_error_mentions_root(self):
-        collector = self._bare_collector()
-        with mock.patch("builtins.open", side_effect=PermissionError):
-            result = collector._power(1000.0)
-        self.assertFalse(result["available"])
-        self.assertIn("root", result["reason"])
-
-    def test_power_missing_rapl_file(self):
-        collector = self._bare_collector()
-        with mock.patch("builtins.open", side_effect=FileNotFoundError):
-            result = collector._power(1000.0)
-        self.assertFalse(result["available"])
-        self.assertIn("RAPL", result["reason"])
-
-    def test_power_first_sample_is_warming_up(self):
-        collector = self._bare_collector()
-        with mock.patch("builtins.open", mock.mock_open(read_data="1000")):
-            result = collector._power(1000.0)
-        self.assertFalse(result["available"])
-        self.assertIn("预热", result["reason"])
-
-    def test_power_second_sample_computes_watts(self):
-        collector = self._bare_collector()
-        with mock.patch("builtins.open", mock.mock_open(read_data="1000000")):
-            collector._power(1000.0)
-        with mock.patch("builtins.open", mock.mock_open(read_data="3000000")):
-            result = collector._power(1002.0)
-        self.assertTrue(result["available"])
-        self.assertAlmostEqual(result["watts"], 1.0, places=3)  # 2e6 uJ / 2s = 1 W
 
     def test_temperature_without_sensors(self):
         collector = self._bare_collector()

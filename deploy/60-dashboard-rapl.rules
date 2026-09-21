@@ -1,0 +1,14 @@
+# 让 RAPL 功耗计数器对普通用户可读（备选方案）
+#
+# 何时用：不想在服务单元里用 ExecStartPre 改权限，或内核/策略不允许服务改 sysfs 时。
+# 安装：
+#   sudo cp deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=powercap
+# 验证（不需要 sudo，能打印数字就成了）：
+#   cat /sys/class/powercap/intel-rapl:0/energy_uj
+#
+# 说明：powercap 的 energy_uj 默认是 0400 root，这里是把它改成所有用户可读（0444）。
+# 该文件只暴露累计能量（微焦），不涉及敏感信息。
+
+ACTION=="add", SUBSYSTEM=="powercap", KERNEL=="intel-rapl*", RUN+="/bin/chmod 0444 /sys%p/energy_uj"

@@ -8,7 +8,7 @@
       series: [{ key: 'cpu', color: '#3ddc97', fill: true }], fixed: [0, 100] },
     { key: 'mem', label: '内存', hex: '#4fc3f7',
       series: [{ key: 'mem_used', color: '#4fc3f7', fill: true }], autoMinTop: 1 },
-    { key: 'power', label: '整机功耗', hex: '#ffb74d',
+    { key: 'power', label: '功耗', hex: '#ffb74d',
       series: [{ key: 'power', color: '#ffb74d', fill: true }], autoMinTop: 10 },
     { key: 'net', label: '网速', hex: null,
       series: [{ key: 'net_down', color: '#3ddc97', fill: false },
@@ -166,10 +166,10 @@
     var power = ov.power;
     if (power.available) {
       setValue('v-power', power.watts.toFixed(1), 'W');
-      setSub('s-power', 'Intel RAPL 整机功耗');
+      setSub('s-power', (power.source || 'Intel RAPL') + ' · RAPL');
     } else {
       markUnavailable('power', power.reason);
-      setSub('s-power', power.reason.indexOf('root') >= 0 ? '以 root 运行可显示' : '');
+      setSub('s-power', power.reason.indexOf('root') >= 0 ? '需 root 或 udev 规则' : '');
     }
 
     var net = ov.net;
