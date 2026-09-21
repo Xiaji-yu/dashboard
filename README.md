@@ -9,8 +9,7 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
   <img src="docs/screenshot.png" alt="总控台概览页" width="900">
 </div>
 
-<!-- 徽章里的 OWNER 换成你的 GitHub 用户名/组织名 -->
-[![CI](https://github.com/OWNER/dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/dashboard/actions/workflows/ci.yml)
+[![CI](https://github.com/Xiaji-yu/dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/Xiaji-yu/dashboard/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-psutil-green.svg)](requirements.txt)
@@ -38,7 +37,7 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 ## 快速开始
 
 ```bash
-git clone https://github.com/OWNER/dashboard.git
+git clone https://github.com/Xiaji-yu/dashboard.git
 cd dashboard
 
 python3 -m venv .venv && source .venv/bin/activate   # 可选

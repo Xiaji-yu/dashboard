@@ -50,5 +50,5 @@
 - 44 个 `unittest` 用例，覆盖采集、缓冲、接口契约与降级路径。
 - GitHub Actions：多 Python 版本跑 ruff 与测试。
 
-[Unreleased]: https://github.com/OWNER/dashboard/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/dashboard/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Xiaji-yu/dashboard/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Xiaji-yu/dashboard/releases/tag/v0.1.0
