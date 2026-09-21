@@ -74,7 +74,7 @@ class PerformanceSeriesTest(unittest.TestCase):
         }
         values = server.performance_series(snapshot)
         self.assertEqual(values, {
-            "cpu0": 5.0, "cpu1": 6.0, "cpu2": 7.0, "cpu3": 8.0,
+            "cpu0": 5.0, "cpu1": 6.0, "cpu2": 7.0, "cpu3": 8.0, "cpu_max": 8.0,
             "fan_cpu": 2600, "gpu_mhz": 350, "temp_acpi": 60.0,
         })
 

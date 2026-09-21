@@ -517,7 +517,7 @@ body {
   .svc-detail { max-width: 42%; }
 }
 
-/* ---------------- 性能与电源页 ---------------- */
+/* ---------------- 性能与电源页（版式参照 docs/reference/02-performance-power.png） ---------------- */
 
 /* 数据密集的页面桌面端也改为自然高度、整页滚动；概览页保持铺满视口 */
 @media (min-width: 901px) {
@@ -527,87 +527,195 @@ body {
     overflow: visible;
   }
 
-  /* 曲线行是 flex:1 1 0、图表是 height:100%，父容器必须有确定高度。
-     桌面端父容器已改为自然高度，上层因此改用视口高度作参照，不能再用百分比。
-     手机端上层保持内容自然高度（固定 58vh 会在矮屏上装不下 5 行而溢出卡片）。 */
-  .perf-upper { height: 58vh; min-height: 380px; }
+  /* 大卡的曲线区靠 height:100% 撑开，父容器必须有确定高度；
+     桌面端父容器是自然高度，所以这里用视口高度作参照（手机端另有固定高度）。 */
+  .perf-top { height: 58vh; min-height: 390px; }
 }
 
-.perf-upper, .perf-lower { flex: none; }
+/* ---- 上半部分：一张大卡（左列数值 + 右侧大曲线） ---- */
 
-/* 处理器卡：超出可见数的线程折叠隐藏 */
-.core-row.is-hidden { display: none; }
-
-.core-toggle {
-  margin-top: 8px;
-  padding: 5px 12px;
-  font-size: 12px;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.05);
-  border: none;
-  border-radius: 999px;
-  cursor: pointer;
+.perf-top {
+  display: flex;
+  gap: 20px;
+  padding: 18px 20px 12px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
 }
 
-.core-toggle:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.09);
+.perf-top-left {
+  flex: 0 0 250px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-/* 处理器卡片：每线程一条占用条 */
-.core-row {
+.perf-top-right {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.big-chart { flex: 1 1 auto; min-height: 0; }
+.big-chart svg { display: block; width: 100%; height: 100%; }
+
+.card-title {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 0;
-  border-bottom: 1px dashed var(--line-soft);
+  gap: 8px;
   font-size: 12.5px;
+  color: var(--muted);
 }
 
-.core-row:last-child { border-bottom: none; padding-bottom: 0; }
-.core-row .name { flex: 0 0 52px; color: var(--dim); }
+.big-value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 36px;
+  font-weight: 300;
+  line-height: 1.05;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
 
-.meter {
-  flex: 1;
-  height: 6px;
+.big-value .unit { font-size: 13px; color: var(--dim); font-weight: 400; }
+.big-value.na { font-size: 20px; color: var(--dim); }
+
+.scale-tag {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.side-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.side-note b { color: var(--text); font-weight: 400; font-variant-numeric: tabular-nums; }
+.side-note .dim { color: var(--dim); }
+.side-note.dim { color: var(--dim); font-size: 11.5px; }
+.side-note.push-bottom { margin-top: auto; }
+
+/* 按物理核分组的占用条（对应参考图的「能效核心 / 性能核心」两组） */
+.core-groups { display: flex; flex-direction: column; gap: 11px; }
+.core-group-head { font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
+
+.core-bars { display: flex; gap: 4px; }
+
+.core-bars i {
+  display: block;
+  flex: 1 1 0;
+  height: 8px;
+  border-radius: 2px;
   background: rgba(255, 255, 255, 0.07);
-  border-radius: 3px;
   overflow: hidden;
 }
 
-.meter i {
+.core-bars b {
   display: block;
   height: 100%;
   width: 0;
-  background: var(--green);
-  border-radius: 3px;
+  border-radius: 2px;
   transition: width 0.45s ease;
 }
 
-.meter.hot i { background: #ffb74d; }
-
-.core-row .pct {
-  flex: 0 0 42px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.core-row .freq {
-  flex: 0 0 76px;
-  text-align: right;
-  color: var(--dim);
+.chart-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
   font-size: 11.5px;
+  color: var(--dim);
+}
+
+.chart-foot .legend { display: flex; align-items: center; gap: 6px; }
+
+.chart-foot .legend i {
+  display: inline-block;
+  width: 11px;
+  height: 2px;
+  border-radius: 1px;
+  margin-left: 10px;
+}
+
+.chart-foot .legend i:first-child { margin-left: 0; }
+
+/* ---- 下半部分：三张并排小卡 ---- */
+
+.perf-bottom {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.temp-pair { display: flex; gap: 22px; }
+.temp-cell { flex: 1 1 0; min-width: 0; }
+.temp-cell .big-value { font-size: 28px; }
+.temp-label { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+
+.temp-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.07);
+  margin-top: 7px;
+  overflow: hidden;
+}
+
+.temp-bar b {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  transition: width 0.45s ease;
+}
+
+.temp-extra {
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.6;
+  margin-top: 9px;
+}
+
+.mini-chart { height: 46px; margin-top: 8px; }
+.mini-chart svg { display: block; width: 100%; height: 100%; }
+
+.kv-rows { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.kv-row b {
+  color: var(--text);
+  font-weight: 400;
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-/* 内存构成：不重叠的分段堆叠条 + 图例 */
+/* 内存构成：不重叠的分段堆叠条 + 两列图例 */
 .mem-stack {
   display: flex;
   height: 14px;
   border-radius: 7px;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.06);
-  margin: 2px 0 10px;
+  margin: 10px 0 12px;
 }
 
 .mem-stack i { display: block; height: 100%; }
@@ -615,7 +723,7 @@ body {
 .mem-legend {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 5px 16px;
+  gap: 6px 16px;
   font-size: 12px;
   color: var(--muted);
 }
@@ -629,13 +737,24 @@ body {
   vertical-align: 1px;
 }
 
-/* 电源与负载卡片占满整行（桌面双列布局的第三张卡） */
-.perf-lower .card.wide { grid-column: 1 / -1; }
-.perf-lower .svc-detail { max-width: 72%; }
+/* ---- 窄屏：大卡改上下堆叠，三张小卡单列 ---- */
+
+@media (max-width: 900px) {
+  .perf-top {
+    flex-direction: column;
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .perf-top-left { flex: none; }
+  .perf-top-right { flex: none; }
+  .big-chart { flex: none; height: 120px; }
+  .perf-bottom { grid-template-columns: 1fr; }
+  .big-value { font-size: 30px; }
+}
 
 @media (max-width: 560px) {
-  .core-row .freq { flex-basis: 66px; font-size: 11px; }
-  .core-row .name { flex-basis: 44px; }
   .mem-legend { grid-template-columns: 1fr; }
-  .perf-lower .svc-detail { max-width: 58%; }
+  .temp-pair { gap: 14px; }
+  .kv-row { font-size: 11.5px; }
 }

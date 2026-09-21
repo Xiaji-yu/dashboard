@@ -43,7 +43,7 @@ INTERVAL = float(os.environ.get("DASHBOARD_INTERVAL", "1.0"))
 SERIES_KEYS = ("cpu", "mem_used", "power", "net_down", "net_up", "disk_free", "temp")
 
 # 性能页额外序列（从快照 performance 段提取，见 performance_series）与每核键的白名单
-PERF_SERIES_KEYS = ("fan_cpu", "gpu_mhz", "temp_acpi")
+PERF_SERIES_KEYS = ("fan_cpu", "gpu_mhz", "temp_acpi", "cpu_max")
 PERCORE_KEY_RE = re.compile(r"cpu\d{1,2}")
 
 state_lock = threading.Lock()
@@ -60,8 +60,11 @@ def performance_series(snapshot):
     out = {}
     cores = (perf.get("cpu") or {}).get("per_core") or {}
     if cores.get("available"):
-        for index, percent in enumerate(cores.get("per_cpu") or ()):
+        per_cpu = cores.get("per_cpu") or []
+        for index, percent in enumerate(per_cpu):
             out[f"cpu{index}"] = percent
+        if per_cpu:
+            out["cpu_max"] = max(per_cpu)
     fans = perf.get("fans") or {}
     if fans.get("available"):
         for fan in fans["list"]:
