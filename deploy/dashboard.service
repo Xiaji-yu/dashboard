@@ -8,9 +8,10 @@
 #   journalctl -u dashboard -f          # 看日志
 #
 # 为什么不用 root 跑这个服务：
-#   看板监听 0.0.0.0 且没有鉴权，把整个进程交给 root 风险太大。
-#   功耗计数器（RAPL）只有 root 可读，所以下面用 ExecStartPre 在启动时单独放开读权限，
-#   服务进程本身仍是普通用户。若你的内核不允许 chmod sysfs，改用 deploy/60-dashboard-rapl.rules。
+#   功耗计数器（RAPL）只有 root 可读，而看板本身并不需要任何特权——为了几个只读计数器
+#   把整个进程连同它的 HTTP 服务交给 root 没有必要。下面用 ExecStartPre 只做那一件事。
+#   （看板目前无鉴权的定位见 SECURITY.md；即便将来加了鉴权，最小权限原则同样适用。）
+#   若你的内核不允许 chmod sysfs，改用 deploy/60-dashboard-rapl.rules。
 
 [Unit]
 Description=8282 总控台（本机实时监控看板）
