@@ -397,14 +397,19 @@ class NetworkDiskInfoTest(unittest.TestCase):
         for key in ("device", "model", "size_gb", "rotational", "mounts",
                     "read_bps", "write_bps", "read_total_gb", "write_total_gb"):
             self.assertIn(key, disk, key)
-        self.assertIsNotNone(disk["read_bps"], "第二次采样应当能算出读写速率")
-        self.assertTrue(disk["mounts"])
         for item in disk["mounts"]:
             self.assertIn("mount", item)
             self.assertIn("used_percent", item)
             self.assertTrue(item["device"].startswith("/dev/"))
             self.assertNotIn("/dev/loop", item["device"], "snap 的 loop 挂载不该出现")
             self.assertNotEqual(item["fstype"], "squashfs")
+        # 只有根挂载真的落在 /sys/block 认得的块设备上（本机是 /dev/sda）才谈得上读写速率；
+        # CI 虚机的根是 /dev/root 或 overlay，这时速率如实为空，不该断言有值。
+        block = disk.get("block")
+        if block and os.path.exists(f"/sys/block/{block}"):
+            self.assertIsNotNone(disk["read_bps"], "第二次采样应当能算出读写速率")
+        else:
+            self.assertIsNone(disk["read_bps"], "认不出块设备时读写速率应当为空")
 
     def test_series_values_include_disk_io(self):
         import server
@@ -595,9 +600,12 @@ class DeviceInfoTest(unittest.TestCase):
         self.assertGreater(summary["threads"], 0)
         self.assertTrue(summary["cpu"])
         self.assertGreater(summary["memory_gb"], 0)
-        # USB：本机至少有根集线器
-        self.assertTrue(info["usb"]["list"])
+        # USB：结构要对；虚机可能整条 USB 总线都没有，所以不断言非空
+        self.assertIsInstance(info["usb"]["list"], list)
         self.assertLessEqual(info["usb"]["external"], info["usb"]["total"])
+        for item in info["usb"]["list"]:
+            self.assertIn("id", item)
+            self.assertIn("hub", item)
         # 网络：至少回环
         self.assertTrue(info["interfaces"]["physical"])
         # 局域网：结构齐全（本机可能一个邻居都没有）

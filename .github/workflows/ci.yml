@@ -48,10 +48,15 @@ jobs:
           DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=8282 \
             DASHBOARD_USER=ci DASHBOARD_PASSWORD=ci-password-1 \
             DASHBOARD_AUTH_FILE=/tmp/ci-auth.json python3 server.py &
-          sleep 2
+          # 等接口就绪（最多 20 秒）：固定 sleep 在慢 runner 上会偶发失败
+          code=""
+          for _ in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' http://127.0.0.1:8282/api/overview || true)
+            [ "$code" = "401" ] && break
+            sleep 1
+          done
 
-          # 未登录应被拦下（接口 401，页面跳登录）
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8282/api/overview)
+          # 未登录应被拦下（接口 401）
           test "$code" = "401" || { echo "未登录应返回 401，实际 $code"; exit 1; }
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8282/)
           test "$code" = "302" || { echo "未登录访问首页应 302，实际 $code"; exit 1; }
