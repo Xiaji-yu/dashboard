@@ -176,9 +176,27 @@ $ curl -s localhost:8282/api/overview | python3 -m json.tool | head -12
 | --- | --- | --- |
 | CPU 占用 | `psutil.cpu_percent()` | 固定 0–100 量程；副标题显示核心数与实时频率 |
 | 内存 | `psutil.virtual_memory()` | 已用 / 总量，副标题带交换区 |
-| 整机功耗 | Intel RAPL `energy_uj` 差分 | `energy_uj` 通常仅 root 可读，普通用户下显示「不可用」 |
+| 功耗 | Intel RAPL `energy_uj` 差分 | 主值取**可靠的域**并在副标题注明来源；`energy_uj` 默认仅 root 可读，见「部署到 systemd」 |
 | 网速 ↓↑ | `psutil.net_io_counters()` 差分 | **只统计物理网卡**，docker 的 `br-*`/`veth`/`docker0` 不计入 |
 | 磁盘剩余 | `psutil.disk_usage()` | 条形图按已用比例填充 |
+
+### 功耗（Intel RAPL）实测口径
+
+`powercap` 下同一个计数器常常同时暴露两个接口（`intel-rapl:*` 与 `intel-rapl-mmio:*`），
+名字相同、数值一致，采集层按域名去重并优先 MSR。
+
+各域读数是否可信要实测判断，本机（i5-7200U，Kaby Lake 移动版）的结果：
+
+| 域 | 空载 | 4 核满载 | 是否可信 |
+| --- | --- | --- | --- |
+| `package-0` CPU 封装 | 1.1 W | 12.5 W | ✅ 跟着负载走，作主值 |
+| `core` CPU 核心 | 0.7 W | 11.7 W | ✅ |
+| `dram` 内存 | 0.3 W | 0.4 W | ✅（空闲时计数器可能长时间不前进，读数 0.00 W） |
+| `psys` 平台功耗 | 0.4 W | **3.6 W** | ❌ 平台功耗不可能小于封装 → 该平台 PSYS 未实现，页面标「未实现」 |
+| `uncore` 核显与内存控制器 | 0.0 W | 0.0 W | ⚠️ 计数器不前进，如实显示 0.00 W |
+
+所以主值的选择规则是：`psys` 只有在**不小于 `package-0`** 时才当作平台功耗，否则用 `package-0`，
+副标题会写明来源（如「CPU 封装 · RAPL」）。空闲域读数为 0.00 W 是真实测量值，不做推断性标注。
 
 下半部分：
 

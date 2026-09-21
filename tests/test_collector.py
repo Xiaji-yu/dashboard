@@ -273,14 +273,17 @@ class PowerRaplTest(unittest.TestCase):
         collector._rapl_domains = None
         return collector
 
-    def write_domain(self, name, energy, index):
-        base = os.path.join(self.tmp.name, "intel-rapl:%d" % index)
+    def write_at(self, dirname, name, energy):
+        base = os.path.join(self.tmp.name, dirname)
         os.makedirs(base, exist_ok=True)
         with open(os.path.join(base, "name"), "w") as handle:
             handle.write(name)
         with open(os.path.join(base, "energy_uj"), "w") as handle:
             handle.write(str(energy))
         return os.path.join(base, "energy_uj")
+
+    def write_domain(self, name, energy, index):
+        return self.write_at("intel-rapl:%d" % index, name, energy)
 
     def test_first_sample_warms_up(self):
         self.write_domain("package-0", 1000000, 0)
@@ -328,6 +331,29 @@ class PowerRaplTest(unittest.TestCase):
         result = self.collector._power(1000.0)
         self.assertFalse(result["available"])
         self.assertIn("root", result["reason"])
+
+    def test_msr_and_mmio_interfaces_are_deduped(self):
+        """同一计数器同时暴露 MSR 与 MMIO 时只保留一个，且优先 MSR。"""
+        self.write_at("intel-rapl-mmio:0", "package-0", 1000000)
+        self.write_at("intel-rapl:0", "package-0", 1000000)
+        paths = self.collector._rapl_paths()
+        self.assertEqual([name for name, _ in paths], ["package-0"])
+        self.assertIn("intel-rapl:0/", paths[0][1])
+        self.assertNotIn("mmio", paths[0][1])
+
+    def test_unimplemented_psys_is_not_primary(self):
+        """psys 比封装还小时判为该平台未实现：主值改用封装，psys 标出来。"""
+        self.write_at("intel-rapl:0", "package-0", 1000000)
+        self.write_at("intel-rapl:1", "psys", 1000000)
+        self.collector._power(1000.0)
+        self.write_at("intel-rapl:0", "package-0", 5000000)   # 4 J / 2 s = 2 W
+        self.write_at("intel-rapl:1", "psys", 2000000)        # 1 J / 2 s = 0.5 W
+        result = self.collector._power(1002.0)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["source"], "CPU 封装")
+        self.assertAlmostEqual(result["watts"], 2.0, places=3)
+        psys = [item for item in result["domains"] if item["name"] == "psys"][0]
+        self.assertTrue(psys.get("suspect"))
 
     def test_counter_reset_is_skipped(self):
         self.write_domain("package-0", 5000000, 0)

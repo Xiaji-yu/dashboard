@@ -267,7 +267,7 @@
     var rows = [];
     /* 功耗构成：主值已是大数字，其余域列成明细（参考图里的「GPU / CPU 等」那种分解） */
     (power.domains || []).slice(1).forEach(function (domain) {
-      rows.push(kvRow(domain.label, domain.watts.toFixed(2) + ' W'));
+      rows.push(kvRow(domain.label, domain.suspect ? '未实现' : domain.watts.toFixed(2) + ' W'));
     });
 
     var batt = perf.battery || {};

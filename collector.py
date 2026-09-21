@@ -315,10 +315,14 @@ class Collector:
         }
 
     def _rapl_paths(self):
-        """枚举 powercap 下的 RAPL 域：name 文件给展示名，energy_uj 是累计能量（微焦）。"""
+        """枚举 powercap 下的 RAPL 域。
+
+        同一个计数器可能同时暴露 MSR 与 MMIO 两个接口（intel-rapl:* 与 intel-rapl-mmio:*），
+        名字相同、数值一样，按名字去重并优先 MSR。
+        """
         if self._rapl_domains is not None:
             return self._rapl_domains
-        domains = []
+        found = {}
         try:
             entries = sorted(os.listdir(rapl_dir()))
         except OSError:
@@ -332,9 +336,12 @@ class Collector:
             except OSError:
                 continue
             name = self._read_sys(os.path.join(base, "name")) or entry
-            domains.append((name, energy))
-        self._rapl_domains = domains
-        return domains
+            previous = found.get(name)
+            is_mmio = "mmio" in entry
+            if previous is None or ("mmio" in previous[0] and not is_mmio):
+                found[name] = (entry, energy)
+        self._rapl_domains = [(name, path) for name, (_, path) in sorted(found.items())]
+        return self._rapl_domains
 
     def _rapl_fail(self, now, reason):
         """记住失败原因（冷却期内不重复读 sysfs），保证返回结构一致。"""
@@ -382,26 +389,35 @@ class Collector:
         watts = {}
         for name, energy in readings.items():
             prev = self._rapl_prev.get(name)
-            if prev is not None:
-                delta_t = now - prev[0]
-                delta_e = energy - prev[1]
-                if delta_t > 0 and delta_e >= 0:  # 计数器溢出时跳过该点
-                    watts[name] = round(delta_e / 1e6 / delta_t, 2)
+            if prev is None:
+                continue
+            delta_t = now - prev[0]
+            delta_e = energy - prev[1]
+            if delta_t > 0 and delta_e >= 0:  # 计数器溢出时跳过该点
+                watts[name] = round(delta_e / 1e6 / delta_t, 2)
         self._rapl_prev = {name: (now, energy) for name, energy in readings.items()}
 
         if not watts:
             return {"available": False, "reason": "正在预热功耗采样"}
 
-        if "psys" in watts:
+        # 主值：psys 只有「不小于封装」时才当作平台功耗，否则用可靠的 package-0。
+        # 依据是实测：本机满载时封装 12.5 W，而 psys 只报 3.5 W——平台功耗不可能小于封装，
+        # 说明该平台的 PSYS 域没正确实现。（空闲域读数为 0.00 W 是真实测量值，不作特殊标注。）
+        psys_sane = "psys" in watts and (
+            "package-0" not in watts or watts["psys"] >= watts["package-0"])
+        if psys_sane:
             primary = "psys"
         elif "package-0" in watts:
             primary = "package-0"
         else:
             primary = max(watts, key=lambda key: watts[key])
-        detail = [
-            {"name": name, "label": RAPL_LABELS.get(name, name), "watts": watts[name]}
-            for name in sorted(watts, key=lambda key: (key != primary, key))
-        ]
+
+        detail = []
+        for name in sorted(watts, key=lambda key: (key != primary, key)):
+            entry = {"name": name, "label": RAPL_LABELS.get(name, name), "watts": watts[name]}
+            if name == "psys" and not psys_sane:
+                entry["suspect"] = "该平台 PSYS 未实现"
+            detail.append(entry)
         return {
             "available": True,
             "watts": watts[primary],
