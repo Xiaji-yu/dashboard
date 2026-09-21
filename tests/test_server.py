@@ -116,6 +116,7 @@ class HttpApiTest(unittest.TestCase):
         with server.state_lock:
             server.state["snapshot"] = snapshot
             server.state["processes"] = rows
+            server.state["network"] = cls.collector.network_info()
             server.state["series_ts"] = snapshot["ts"]
             for key, value in server.series_values(snapshot).items():
                 server.state["history"].append(key, snapshot["ts"], value)
@@ -203,6 +204,17 @@ class HttpApiTest(unittest.TestCase):
         for key in ("pid", "name", "user", "cpu", "rss_mb", "status", "threads",
                     "started", "cmd", "container"):
             self.assertIn(key, first, key)
+
+    def test_network_contract(self):
+        status, ctype, body = self.request("/api/network")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", ctype)
+        payload = json.loads(body)
+        self.assertTrue(payload["ready"])
+        for key in ("nic", "connection", "disk", "net", "interval", "ts"):
+            self.assertIn(key, payload, key)
+        self.assertIn("mounts", payload["disk"])
+        self.assertIn("read_bps", payload["disk"])
 
     def test_overview_keeps_process_list_small(self):
         """概览快照只带前 6 条，完整列表由 /api/processes 单独提供。"""

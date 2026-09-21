@@ -16,7 +16,8 @@ from unittest import mock
 import psutil
 
 from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, container_id_from_cgroup,
-                       is_virtual_nic, listen_ports, pick_nic, temp_entry_key)
+                       is_virtual_nic, is_wireless_nic, listen_ports, parse_default_gateway,
+                       pick_nic, temp_entry_key)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -324,6 +325,91 @@ class ProcessListTest(unittest.TestCase):
         self.assertEqual(collector._container_of("abcdef123456"),
                          {"id": "abcdef123456", "name": "homeassistant"})
         self.assertIsNone(collector._container_of(None))
+
+
+class DefaultGatewayTest(unittest.TestCase):
+    """/proc/net/route 解析：网关是十六进制小端。"""
+
+    ROUTE = (
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        "enx000ec6c87fb8\t00000000\t0201A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+        "enx000ec6c87fb8\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
+    )
+
+    def test_parses_default_gateway(self):
+        self.assertEqual(parse_default_gateway(self.ROUTE), "192.168.1.2")
+
+    def test_missing_default_route(self):
+        self.assertIsNone(parse_default_gateway("Iface\tDestination\neth0\t0000A8C0\n"))
+        self.assertIsNone(parse_default_gateway(""))
+        self.assertIsNone(parse_default_gateway(None))
+
+    def test_wireless_detection(self):
+        for name in ("wlp2s0", "wlan0", "wlx00c0ca123456"):
+            self.assertTrue(is_wireless_nic(name), name)
+        for name in ("enx000ec6c87fb8", "eth0", "enp3s0", None):
+            self.assertFalse(is_wireless_nic(name), name)
+
+
+class NetworkDiskInfoTest(unittest.TestCase):
+    """对着真实系统跑：只断言结构与不变量。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.collector = Collector()
+        cls.collector.sample()
+        cls.network = cls.collector.network_info()
+
+    def test_nic_carries_link_fields(self):
+        nic = self.network["nic"]
+        if not nic.get("available"):
+            self.assertTrue(nic.get("reason"))
+            return
+        for key in ("name", "wireless", "up", "mtu"):
+            self.assertIn(key, nic, key)
+        self.assertIsInstance(nic["wireless"], bool)
+
+    def test_connection_summary(self):
+        conn = self.network["connection"]
+        for key in ("local_ip", "gateway", "medium", "listening", "proxy_port", "total"):
+            self.assertIn(key, conn, key)
+        if conn.get("available"):
+            self.assertGreaterEqual(conn["total"], 1)
+            for item in conn["remotes"]:
+                self.assertIn("addr", item)
+                self.assertIn("count", item)
+
+    def test_latency_helper_degrades_quietly(self):
+        self.assertIsNone(Collector.tcp_latency(None, 443))
+        self.assertIsNone(Collector.tcp_latency("127.0.0.1", 1, timeout=0.2))
+
+    def test_disk_bundle_fields_and_rates(self):
+        self.collector._disk(time.time())          # 第一次只建立基准
+        time.sleep(0.3)
+        disk = self.collector._disk(time.time())
+        self.assertTrue(disk["available"])
+        for key in ("device", "model", "size_gb", "rotational", "mounts",
+                    "read_bps", "write_bps", "read_total_gb", "write_total_gb"):
+            self.assertIn(key, disk, key)
+        self.assertIsNotNone(disk["read_bps"], "第二次采样应当能算出读写速率")
+        self.assertTrue(disk["mounts"])
+        for item in disk["mounts"]:
+            self.assertIn("mount", item)
+            self.assertIn("used_percent", item)
+            self.assertTrue(item["device"].startswith("/dev/"))
+            self.assertNotIn("/dev/loop", item["device"], "snap 的 loop 挂载不该出现")
+            self.assertNotEqual(item["fstype"], "squashfs")
+
+    def test_series_values_include_disk_io(self):
+        import server
+        snapshot = {"cpu": {"available": False}, "memory": {"available": False},
+                    "power": {"available": False}, "net": {"available": False},
+                    "temp": {"available": False},
+                    "disk": {"available": True, "free_gb": 10.0,
+                             "read_bps": 1234.5, "write_bps": 67.8}}
+        values = server.series_values(snapshot)
+        self.assertEqual(values["disk_read"], 1234.5)
+        self.assertEqual(values["disk_write"], 67.8)
 
 
 class PowerRaplTest(unittest.TestCase):

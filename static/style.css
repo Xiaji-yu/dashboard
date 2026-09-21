@@ -899,3 +899,21 @@ body {
   .proc-head .col-pid, .proc-row .col-pid,
   .proc-head .col-user, .proc-row .col-user { display: none; }
 }
+
+/* ---------------- 网络与磁盘页 ---------------- */
+
+/* 「下载 / 上传」两个大数字上下排列（参考图的左列） */
+.net-block { margin-bottom: 6px; }
+.net-label { font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.net-block .big-value { font-size: 30px; }
+
+/* 磁盘读写曲线：卡片是自然高度，图表要给确定高度 */
+.disk-chart { height: 150px; margin: 4px 0 12px; }
+.disk-chart svg { display: block; width: 100%; height: 100%; }
+
+.mount-rows { border-top: 1px solid var(--line-soft); padding-top: 8px; }
+
+@media (max-width: 900px) {
+  .net-block .big-value { font-size: 26px; }
+  .disk-chart { height: 110px; }
+}

@@ -6,6 +6,8 @@
   GET /static/*              前端资源
   GET /api/overview          瞬时快照：指标 + 最忙进程 + 服务状态
   GET /api/performance       性能与电源：每核占用、温度、风扇、GPU、电池、内存构成
+  GET /api/processes         全部进程（含命令行、用户、容器归属）
+  GET /api/network           网络与磁盘：网卡、连接、网关/外网延迟、磁盘容量与读写
   GET /api/series?since=TS   曲线数据；省略 since 返回整个时间窗口
   GET /api/series?keys=a,b   只返回指定曲线键（未知键返回 400）
 
@@ -40,14 +42,16 @@ PORT = int(os.environ.get("DASHBOARD_PORT", "8282"))
 INTERVAL = float(os.environ.get("DASHBOARD_INTERVAL", "1.0"))
 
 # 曲线序列：键 -> 取自快照的哪个字段
-SERIES_KEYS = ("cpu", "mem_used", "power", "net_down", "net_up", "disk_free", "temp")
+SERIES_KEYS = ("cpu", "mem_used", "power", "net_down", "net_up", "disk_free", "temp",
+               "disk_read", "disk_write")
 
 # 性能页额外序列（从快照 performance 段提取，见 performance_series）与每核键的白名单
 PERF_SERIES_KEYS = ("fan_cpu", "gpu_mhz", "temp_acpi", "cpu_max")
 PERCORE_KEY_RE = re.compile(r"cpu\d{1,2}")
 
 state_lock = threading.Lock()
-state = {"snapshot": None, "history": History(), "series_ts": 0.0, "processes": []}
+state = {"snapshot": None, "history": History(), "series_ts": 0.0,
+         "processes": [], "network": {}}
 
 
 def valid_series_key(key):
@@ -96,6 +100,8 @@ def series_values(snapshot):
         "net_down": net["down_bps"] if net["available"] else None,
         "net_up": net["up_bps"] if net["available"] else None,
         "disk_free": disk["free_gb"] if disk["available"] else None,
+        "disk_read": disk.get("read_bps") if disk["available"] else None,
+        "disk_write": disk.get("write_bps") if disk["available"] else None,
         "temp": temp["celsius"] if temp["available"] else None,
     }
 
@@ -111,10 +117,12 @@ def sampler(collector):
             # 概览快照只留前 6 条，避免每次轮询都拖着 30KB 的列表。
             snapshot["processes"] = rows[:6]
             snapshot["process_count"] = len(rows)
+            network = collector.network_info()
             with state_lock:
                 state["snapshot"] = snapshot
                 state["series_ts"] = snapshot["ts"]
                 state["processes"] = rows
+                state["network"] = network
                 for key, value in series_values(snapshot).items():
                     state["history"].append(key, snapshot["ts"], value)
                 for key, value in performance_series(snapshot).items():
@@ -140,6 +148,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self._performance())
         if path == "/api/processes":
             return self._send_json(self._processes())
+        if path == "/api/network":
+            return self._send_json(self._network())
         if path == "/api/series":
             query = parse_qs(parsed.query)
             raw = query.get("since", ["0"])[0]
@@ -191,6 +201,21 @@ class Handler(BaseHTTPRequestHandler):
         payload["ts"] = snapshot["ts"]
         payload["window"] = WINDOW_SECONDS
         payload["interval"] = INTERVAL
+        return payload
+
+    @staticmethod
+    def _network():
+        with state_lock:
+            network = state["network"]
+            snapshot = state["snapshot"]
+        if not network or snapshot is None:
+            return {"ready": False, "window": WINDOW_SECONDS}
+        payload = dict(network)
+        payload["ready"] = True
+        payload["ts"] = snapshot["ts"]
+        payload["interval"] = INTERVAL
+        payload["disk"] = snapshot.get("disk") or {}
+        payload["net"] = snapshot.get("net") or {}      # 当前瞬时速率（大数字用）
         return payload
 
     @staticmethod
@@ -275,6 +300,8 @@ def lan_address():
 def main():
     collector = Collector()
     threading.Thread(target=sampler, args=(collector,), daemon=True).start()
+    # 延迟探测单独一个线程：连接超时不该拖慢 1 秒采样
+    threading.Thread(target=collector.probe_loop, daemon=True).start()
 
     try:
         httpd = create_server(collector, HOST, PORT)

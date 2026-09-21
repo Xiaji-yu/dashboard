@@ -45,6 +45,31 @@ CONTAINER_ID_RE = re.compile(
     r"(?:docker-|/docker/|cri-containerd-|/cri-containerd/|libpod-)([0-9a-f]{12,64})"
 )
 
+# 常见代理端口（「本地代理」一行用；8080 太通用，刻意不算）
+PROXY_PORTS = (7890, 7891, 1080, 1081, 8118, 3128, 8889, 7897)
+# 延迟探测：网关试这几个端口取最快的一个；外网目标可用环境变量改
+GATEWAY_PROBE_PORTS = (53, 22, 443, 80)
+NET_PROBE_TARGET = os.environ.get("DASHBOARD_NET_TARGET", "www.baidu.com:443")
+NET_PROBE_INTERVAL = 10.0
+
+
+def is_wireless_nic(name):
+    """Linux 命名约定：wl* 是无线网卡。"""
+    return (name or "").lower().startswith("wl")
+
+
+def parse_default_gateway(text):
+    """从 /proc/net/route 取默认网关（Destination 0.0.0.0 那行，网关是十六进制小端）。"""
+    for line in (text or "").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) > 2 and fields[1] == "00000000":
+            try:
+                raw = int(fields[2], 16)
+            except ValueError:
+                continue
+            return ".".join(str((raw >> shift) & 0xFF) for shift in (0, 8, 16, 24))
+    return None
+
 
 def container_id_from_cgroup(text):
     """从 cgroup 内容里取出容器 ID；不是容器进程就返回 None。"""
@@ -178,6 +203,11 @@ class Collector:
         self._container_running = 0
         self._gpu_card = self._find_gpu_card()
         self._core_topology = self._read_core_topology()
+        self._disk_io_prev = None
+        self._disk_static_cache = None
+        self._gateway = self._read_gateway()
+        self._probe = {"gateway_ms": None, "internet_ms": None,
+                       "internet_target": NET_PROBE_TARGET, "at": 0.0}
         psutil.cpu_percent(interval=None)  # 预热，让首次采样就有意义
         self._prime_processes()
 
@@ -332,7 +362,7 @@ class Collector:
             "memory": memory,
             "power": power,
             "net": self._net(now),
-            "disk": self._disk(),
+            "disk": self._disk(now),
             "temp": self._temp_from(temps),
             "load": load,
             # 性能与电源页的数据段：与概览共享同一批采样结果，不重复读内核
@@ -519,7 +549,7 @@ class Collector:
         return {"available": True, "nic": self.nic,
                 "down_bps": round(down, 1), "up_bps": round(up, 1)}
 
-    def _disk(self):
+    def _disk(self, now):
         try:
             usage = psutil.disk_usage(self.disk_path)
         except Exception as exc:
@@ -530,12 +560,14 @@ class Collector:
             "free_gb": round(usage.free / GIB, 1),
             "total_gb": round(usage.total / GIB, 1),
             "used_percent": round(usage.percent, 1),
+            "mounts": self._mounts(),
+            **self._disk_static(),
+            **self._disk_io(now),
         }
 
     def _temp(self):
         """概览用的单值温度：从全部通道里挑封装温度，退化到第一个通道。"""
         return self._temp_from(self._all_temps())
-
     def _all_temps(self):
         """全部温度通道。性能页展示列表，概览的单值温度也从这里挑，避免重复读 sysfs。"""
         try:
@@ -655,6 +687,203 @@ class Collector:
             return {"available": False, "reason": "本机不支持负载查询"}
         return {"available": True, "avg1": round(avg1, 2),
                 "avg5": round(avg5, 2), "avg15": round(avg15, 2)}
+
+    # ---------------- 网络与磁盘 ----------------
+
+    def _read_gateway(self):
+        """默认网关：/proc/net/route 免 root 读取。"""
+        return parse_default_gateway(self._read_sys("/proc/net/route"))
+
+    @staticmethod
+    def tcp_latency(host, port, timeout=0.6):
+        """TCP 握手耗时（毫秒）。没有 ICMP 权限，用 TCP 连接近似往返延迟。"""
+        if not host:
+            return None
+        started = time.perf_counter()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return round((time.perf_counter() - started) * 1000, 1)
+        except OSError:
+            return None
+
+    def probe_loop(self):
+        """后台线程：定期测网关与外网延迟。
+
+        放在独立线程里，避免连接超时拖慢 1 秒采样；页面读的是最近一次结果。
+        """
+        while True:
+            started = time.time()
+            gateway_ms = None
+            if self._gateway:
+                for port in GATEWAY_PROBE_PORTS:
+                    value = self.tcp_latency(self._gateway, port)
+                    if value is not None:
+                        gateway_ms = value if gateway_ms is None else min(gateway_ms, value)
+            target = NET_PROBE_TARGET
+            host, _, port_text = target.rpartition(":")
+            try:
+                port = int(port_text or "443")
+            except ValueError:
+                host, port = target, 443
+            internet_ms = self.tcp_latency(host, port, timeout=2.0) if host else None
+            self._probe = {"gateway_ms": gateway_ms, "internet_ms": internet_ms,
+                           "internet_target": target, "at": time.time()}
+            time.sleep(max(1.0, NET_PROBE_INTERVAL - (time.time() - started)))
+
+    def _nic_info(self):
+        if not self.nic:
+            return {"available": False, "reason": "没有找到可用的物理网卡"}
+        stats = psutil.net_if_stats().get(self.nic)
+        info = {"available": True, "name": self.nic, "wireless": is_wireless_nic(self.nic)}
+        if stats:
+            info.update({
+                "up": bool(stats.isup),
+                "speed_mbps": stats.speed or None,
+                "duplex": {0: None, 1: "半双工", 2: "全双工"}.get(stats.duplex),
+                "mtu": stats.mtu,
+            })
+        for addr in psutil.net_if_addrs().get(self.nic, []):
+            if addr.family == socket.AF_INET:
+                info["ipv4"] = addr.address
+                info["netmask"] = addr.netmask
+            elif addr.family == socket.AF_INET6 and not info.get("ipv6"):
+                info["ipv6"] = addr.address.split("%")[0]   # 去掉 %iface 后缀
+            elif addr.family == psutil.AF_LINK:
+                info["mac"] = addr.address
+        try:
+            counters = psutil.net_io_counters(pernic=True).get(self.nic)
+        except Exception:
+            counters = None
+        if counters:
+            info.update({
+                "recv_total_gb": round(counters.bytes_recv / GIB, 2),
+                "sent_total_gb": round(counters.bytes_sent / GIB, 2),
+                "dropin": counters.dropin,
+                "dropout": counters.dropout,
+            })
+        return info
+
+    def _connections(self, limit=12):
+        """连接概况 + 连接数最多的对端。非 root 一般拿不到连接归属的进程。"""
+        try:
+            conns = psutil.net_connections(kind="inet")
+        except Exception as exc:
+            return {"available": False, "reason": f"连接表读取失败：{exc}"}
+        established = [item for item in conns if item.status == "ESTABLISHED"]
+        counter = {}
+        for item in established:
+            if not item.raddr:
+                continue
+            key = f"{item.raddr.ip}:{item.raddr.port}"
+            counter[key] = counter.get(key, 0) + 1
+        remotes = [{"addr": addr, "count": count}
+                   for addr, count in sorted(counter.items(),
+                                             key=lambda pair: -pair[1])[:limit]]
+        return {"available": True, "total": len(conns), "established": len(established),
+                "connection_listening": sum(1 for item in conns if item.status == "LISTEN"),
+                "remotes": remotes,
+                "process_attribution": any(item.pid for item in established)}
+
+    def network_info(self):
+        """网络页数据（延迟取后台探测线程的最近一次结果）。"""
+        nic = self._nic_info()
+        ports = listen_ports()
+        proxy = next((port for port in PROXY_PORTS if port in ports), None)
+        connection = dict(self._connections())
+        connection.update({
+            "local_ip": nic.get("ipv4"),
+            "gateway": self._gateway,
+            "medium": "无线" if nic.get("wireless") else "有线",
+            "gateway_ms": self._probe.get("gateway_ms"),
+            "internet_ms": self._probe.get("internet_ms"),
+            "internet_target": self._probe.get("internet_target"),
+            "proxy_port": proxy,
+            "listening": len(ports),
+        })
+        return {"nic": nic, "connection": connection}
+
+    def _disk_static(self):
+        """磁盘静态信息：设备、型号、容量、是否机械盘、总线（读一次后缓存）。"""
+        if self._disk_static_cache is not None:
+            return self._disk_static_cache
+        info = {"device": None, "block": None, "model": None,
+                "size_gb": None, "rotational": None, "bus": None}
+        for part in psutil.disk_partitions(all=False):
+            if part.mountpoint == self.disk_path and part.device.startswith("/dev/"):
+                info["device"] = part.device
+                info["block"] = re.sub(r"\d+$", "", os.path.basename(part.device))
+                break
+        block = info["block"]
+        if block:
+            size = self._read_sys(f"/sys/block/{block}/size")
+            if size and size.isdigit():
+                info["size_gb"] = round(int(size) * 512 / GIB, 1)
+            rotational = self._read_sys(f"/sys/block/{block}/queue/rotational")
+            if rotational is not None:
+                info["rotational"] = rotational == "1"
+            info["model"] = (self._udev_model(block)
+                             or self._read_sys(f"/sys/block/{block}/device/model"))
+        self._disk_static_cache = info
+        return info
+
+    @staticmethod
+    def _udev_model(block):
+        """udevadm 给完整型号（sysfs 的 model 只有 16 字符），启动时读一次。"""
+        try:
+            done = subprocess.run(
+                ["udevadm", "info", "--query=property", f"--path=/sys/block/{block}"],
+                capture_output=True, text=True, timeout=3, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in done.stdout.splitlines():
+            if line.startswith("ID_MODEL="):
+                return line.split("=", 1)[1].replace("_", " ").strip()
+        return None
+
+    def _mounts(self):
+        """真实磁盘上的挂载点。跳过 tmpfs/overlay，以及 snap 的 loop/squashfs 噪声。"""
+        mounts = []
+        for part in psutil.disk_partitions(all=False):
+            if not part.device.startswith("/dev/"):
+                continue
+            if part.device.startswith("/dev/loop") or part.fstype == "squashfs":
+                continue
+            try:
+                usage = psutil.disk_usage(part.mountpoint)
+            except (PermissionError, OSError):
+                continue
+            mounts.append({
+                "mount": part.mountpoint, "device": part.device, "fstype": part.fstype,
+                "total_gb": round(usage.total / GIB, 1),
+                "used_percent": round(usage.percent, 1),
+                "free_gb": round(usage.free / GIB, 1),
+            })
+        mounts.sort(key=lambda item: item["mount"])
+        return mounts
+
+    def _disk_io(self, now):
+        """磁盘读写速率（差分）与累计量。"""
+        out = {"read_bps": None, "write_bps": None,
+               "read_total_gb": None, "write_total_gb": None}
+        block = self._disk_static().get("block")
+        if not block:
+            return out
+        try:
+            counters = psutil.disk_io_counters(perdisk=True).get(block)
+        except Exception:
+            counters = None
+        if counters is None:
+            return out
+        out["read_total_gb"] = round(counters.read_bytes / GIB, 2)
+        out["write_total_gb"] = round(counters.write_bytes / GIB, 2)
+        if self._disk_io_prev is not None:
+            prev_ts, prev_read, prev_write = self._disk_io_prev
+            delta_t = now - prev_ts
+            if delta_t > 0:
+                out["read_bps"] = round(max(0.0, (counters.read_bytes - prev_read) / delta_t), 1)
+                out["write_bps"] = round(max(0.0, (counters.write_bytes - prev_write) / delta_t), 1)
+        self._disk_io_prev = (now, counters.read_bytes, counters.write_bytes)
+        return out
 
     # ---------------- 服务状态（带 TTL 缓存，避免频繁起 docker 子进程） ----------------
 
