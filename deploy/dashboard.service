@@ -43,7 +43,9 @@ Environment=DASHBOARD_INTERVAL=1.0
 # 兜底：systemd 系统服务在 User= 为空/被删时默认以 root 运行（man systemd.exec），
 # 这里先检查实际生效的 UID，是 root 就直接拒绝启动，避免「悄悄拿到 root」。
 # （ConditionUser=!root 在这里没用：它检查的是服务管理器，PID 1 永远是 root。）
-ExecStartPre=/bin/sh -c 'if [ "$(id -u)" -eq 0 ]; then echo "拒绝以 root 运行：请在 unit 里设置 User=（见 deploy/README.md）" >&2; exit 1; fi'
+# 用 ExecCondition 而不是 ExecStartPre：条件不满足时 systemd 直接跳过这次启动、
+# 且不标记失败，因此不会和 Restart=always 组合成「每 3 秒重试一次」的循环。
+ExecCondition=/bin/sh -c 'if [ "$(id -u)" -eq 0 ]; then echo "拒绝以 root 运行：请在 unit 里设置 User=（见 deploy/README.md）" >&2; exit 1; fi'
 
 # 以 root 身份放开 RAPL 功耗计数器的读权限（只在每次启动时执行一次）。
 # 读不到就静默跳过，不影响服务启动。

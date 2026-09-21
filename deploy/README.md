@@ -64,6 +64,10 @@ journalctl -u dashboard | grep auth
 # [auth] 凭据文件：/home/xiaji/code/dashboard/auth.json（权限 600，已加入 .gitignore；登录后请自行修改密码）
 ```
 
+journald 的日志只有特权用户能读；用 `run.sh` 启动时日志文件是 600（脚本里设了 `umask 077`）。
+改完密码后可以清掉那一行：`journalctl --rotate && journalctl --vacuum-time=1s` 或直接
+`sed -i '/初始账号/d' server.log`。
+
 登录后立刻在侧栏「账号」里改密码。忘记密码就 `rm auth.json && sudo systemctl restart dashboard`。
 
 不想用随机密码，也可以指定初始账密（**只在凭据文件不存在时生效**）：
@@ -106,7 +110,13 @@ dashboard.example.com {
 }
 ```
 
-（记得把 unit 里的 `DASHBOARD_HOST` 改成 `127.0.0.1`，让看板只监听回环。）
+两件必须一起做的事：
+
+1. 把 unit 里的 `DASHBOARD_HOST` 改成 `127.0.0.1`，让看板只监听回环；
+2. **设 `Environment=DASHBOARD_TRUST_PROXY=1`**。反代之后所有请求的来源 IP 都是代理自己，
+   而登录失败限速（5 次 / 5 分钟）是按来源 IP 计的——不开这个开关，任何人都能连错几次
+   把唯一账号一起锁在门外。开了之后看板按 `X-Forwarded-For` 的第一跳计数。
+   （默认不信任该头，是为了防止直接访问时伪造它绕过限速。）
 
 ### 7. 日志、更新、备份
 
@@ -148,7 +158,9 @@ sudo systemctl restart dashboard
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 服务启动失败，日志里有「拒绝以 root 运行」 | `User=` 被删掉或留空了，补上 `User=你的账号` 即可 |
+| 服务启动失败/被跳过，日志里有「拒绝以 root 运行」 | `User=` 被删掉或留空了，补上 `User=你的账号` 即可 |
+| 反代后所有人都登不进来（429） | 忘了设 `DASHBOARD_TRUST_PROXY=1`，限速把所有人算成了代理一个 IP |
+| 凭据损坏后服务起不来 | 这是有意为之（避免静默覆盖丢账号）；看提示里的 `auth.json.corrupt-*` 备份，确认要重置就移走 `auth.json` 再启动 |
 | 服务起不来，端口被占 | 还有 run.sh 起的实例：`./run.sh stop` 或 `ss -tlnp \| grep 8282` 看看是谁 |
 | 页面「局域网设备」只有邻居表 | 少了 `AmbientCapabilities=CAP_NET_RAW`，或本机没装 `iputils-ping` |
 | 容器卡显示 permission denied | 服务用户不在 `docker` 组，或 docker 未启动（unit 的 `After=docker.service` 已处理顺序） |

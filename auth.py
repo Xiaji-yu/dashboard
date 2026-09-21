@@ -19,6 +19,7 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 
@@ -28,6 +29,16 @@ MAX_SESSIONS = 20                # 最多保留的会话数，超出淘汰最旧
 LOGIN_WINDOW = 300.0             # 失败计数窗口：5 分钟
 LOGIN_MAX_FAILURES = 5           # 窗口内允许的失败次数
 PASSWORD_MIN_LENGTH = 8
+MAX_TRACKED_IPS = 1000           # 限速表最多记这么多来源，防止被刷爆内存
+SESSION_SAVE_INTERVAL = 300.0    # 会话 last_seen 至少间隔这么久才落盘一次
+
+
+class AuthConfigError(RuntimeError):
+    """凭据文件不可用（读不到或已损坏）。
+
+    这种情况**绝不能**当成「首次启动」去生成新凭据：那会静默覆盖掉原账号，
+    造成不可逆的数据丢失。宁可让服务起不来，由人来决定修复还是重置。
+    """
 
 
 def hash_password(password, salt=None, rounds=PBKDF2_ROUNDS):
@@ -42,8 +53,25 @@ def hash_password(password, salt=None, rounds=PBKDF2_ROUNDS):
     }
 
 
+def password_record_ok(record):
+    """口令记录是否完整可用（缺字段的记录会让登录永远失败，必须当成损坏）。"""
+    if not isinstance(record, dict):
+        return False
+    if record.get("algo") != "pbkdf2_sha256":
+        return False
+    try:
+        salt = base64.b64decode(record["salt"])
+        digest = base64.b64decode(record["hash"])
+        int(record.get("rounds") or PBKDF2_ROUNDS)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(salt) and bool(digest)
+
+
 def verify_password(password, record):
     """校验口令。任何字段异常都当作失败，不抛异常。"""
+    if not isinstance(password, str):
+        return False
     if not isinstance(record, dict):
         return False
     try:
@@ -70,20 +98,50 @@ class AuthStore:
         self.logger = logger or (lambda message: None)
         self._lock = threading.Lock()
         self._failures = {}          # ip -> [失败时间戳]
+        self._last_save = 0.0        # 上次落盘时间（session 刷新节流用）
         self.data = {}
         self._load_or_create(username, password)
 
     # ---------------- 读写文件 ----------------
 
     def _load_or_create(self, username, password):
+        """载入凭据；**只有文件确实不存在**时才生成初始凭据。
+
+        读不到（权限/属主不匹配）或解析失败时一律抛 AuthConfigError，
+        并把损坏文件另存一份，绝不覆盖——覆盖等于把原账号口令永久抹掉。
+        """
         try:
             with open(self.path, "r", encoding="utf-8") as handle:
-                self.data = json.load(handle)
-        except (OSError, ValueError):
-            self.data = {}
-        if self.data.get("username") and isinstance(self.data.get("password"), dict):
+                raw = handle.read()
+        except FileNotFoundError:
+            raw = None
+        except OSError as exc:
+            raise AuthConfigError(
+                f"凭据文件读不到：{self.path}\n  {exc}\n"
+                f"  为避免覆盖有效凭据，服务不会自动重建账号。\n"
+                f"  请修好权限/属主（文件应为 600，属主为运行服务的用户）后重启；\n"
+                f"  确实要重置账号，请手动把它移走再启动。") from exc
+
+        if raw is not None:
+            try:
+                self.data = json.loads(raw)
+            except ValueError as exc:
+                backup = self._quarantine()
+                raise AuthConfigError(
+                    f"凭据文件解析失败：{self.path}\n  {exc}\n"
+                    f"  原文件已另存为：{backup or '（另存失败，原文件未被修改）'}\n"
+                    f"  服务不会自动重建账号：确认要重置就移走 {self.path} 后重启。") from exc
+            if not (isinstance(self.data.get("username"), str) and self.data["username"].strip()
+                    and password_record_ok(self.data.get("password"))):
+                backup = self._quarantine()
+                raise AuthConfigError(
+                    f"凭据文件记录不完整：{self.path}\n"
+                    f"  （缺用户名，或口令记录缺 salt/hash——这种文件会让登录永远失败）\n"
+                    f"  原文件已另存为：{backup or '（另存失败，原文件未被修改）'}\n"
+                    f"  服务不会自动重建账号：确认要重置就移走 {self.path} 后重启。")
             return
-        # 首次启动：优先用环境变量/参数给的账密，否则随机生成
+
+        # 到这里说明文件确实不存在：这时才生成初始凭据
         user = username or "admin"
         secret = password or generate_password()
         self.data = {
@@ -98,16 +156,34 @@ class AuthStore:
         self.logger(f"[auth] 首次启动，已生成初始账号：{user} / {secret}")
         self.logger(f"[auth] 凭据文件：{self.path}（权限 600，已加入 .gitignore；登录后请自行修改密码）")
 
+    def _quarantine(self):
+        """把损坏的凭据另存一份（保留原文件，绝不覆盖），返回备份路径。"""
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = f"{self.path}.corrupt-{stamp}"
+        try:
+            shutil.copy2(self.path, target)
+            os.chmod(target, 0o600)
+            return target
+        except OSError:
+            return None
+
     def _save(self):
-        """写文件：目录不存在就建，权限收到 600（凭据不外泄给其他用户）。"""
+        """写文件：目录不存在就建，**创建时就带 0600**，再原子替换。
+
+        注意不能用 open() 之后再 chmod：那样中间会有一个 0644 的窗口，
+        而临时文件里含全部活跃会话令牌。
+        """
         directory = os.path.dirname(os.path.abspath(self.path))
         try:
             os.makedirs(directory, exist_ok=True)
             tmp = f"{self.path}.tmp"
-            with open(tmp, "w", encoding="utf-8") as handle:
+            handle = os.fdopen(
+                os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                "w", encoding="utf-8")
+            with handle:
                 json.dump(self.data, handle, ensure_ascii=False, indent=2)
-            os.chmod(tmp, 0o600)
             os.replace(tmp, self.path)
+            self._last_save = time.time()
         except OSError as exc:
             self.logger(f"[auth] 凭据写入失败：{exc}")
 
@@ -125,7 +201,15 @@ class AuthStore:
             return max(1, int(LOGIN_WINDOW - (now - stamps[0])))
 
     def _record_failure(self, ip):
-        self._failures.setdefault(ip, []).append(time.time())
+        """记录一次失败；顺手清理过期记录并给字典设上限，避免被刷爆内存。"""
+        now = time.time()
+        self._failures[ip] = [stamp for stamp in self._failures.get(ip, [])
+                              if now - stamp < LOGIN_WINDOW]
+        self._failures[ip].append(now)
+        if len(self._failures) > MAX_TRACKED_IPS:
+            for key in sorted(self._failures,
+                              key=lambda item: self._failures[item][-1])[:len(self._failures) // 4]:
+                self._failures.pop(key, None)
 
     def _clear_failures(self, ip):
         self._failures.pop(ip, None)
@@ -146,7 +230,10 @@ class AuthStore:
     def login(self, username, password, ip="unknown"):
         """校验账密；成功返回会话令牌，失败返回 None（并计入失败次数）。"""
         with self._lock:
-            if (username or "").strip() != self.data.get("username"):
+            if not isinstance(username, str) or not isinstance(password, str):
+                self._record_failure(ip)      # 类型不对也算一次失败，但不抛异常
+                return None
+            if username.strip() != self.data.get("username"):
                 # 用户名也不对时同样计入失败，避免探测
                 self._record_failure(ip)
                 return None
@@ -163,15 +250,22 @@ class AuthStore:
             return token
 
     def session(self, token):
-        """校验会话令牌；有效则刷新 last_seen 并返回 {username, created}。"""
-        if not token:
+        """校验会话令牌；有效则刷新 last_seen 并返回 {username, created}。
+
+        last_seen 会按 SESSION_SAVE_INTERVAL 节流落盘：否则重启后按磁盘上的登录时间算 TTL，
+        天天在用的浏览器也会被迫重新登录。
+        """
+        if not token or not isinstance(token, str):
             return None
         with self._lock:
             sessions = self._prune_sessions()
             info = sessions.get(token)
             if not info:
                 return None
-            info["last_seen"] = time.time()
+            now = time.time()
+            info["last_seen"] = now
+            if now - self._last_save >= SESSION_SAVE_INTERVAL:
+                self._save()
             return {"username": self.data.get("username"), "created": info.get("created")}
 
     def logout(self, token):

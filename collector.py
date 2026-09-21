@@ -187,6 +187,43 @@ def oui_vendor(mac, table=None):
     return table.get(mac.upper()[:8])
 
 
+def parse_probe_targets(data):
+    """校验 probes.json 的内容，返回 (targets, problems)。
+
+    顶层必须是对象、probes 必须是数组、每个元素必须是有 host/port 的对象；
+    任何不合规都只记录问题并跳过，绝不抛异常——否则会连带打死探测线程与整站采样。
+    """
+    problems = []
+    if not isinstance(data, dict):
+        return [], [f"probes.json 顶层应当是对象，实际是 {type(data).__name__}"]
+    raw = data.get("probes")
+    if raw is None:
+        return [], ["probes.json 里没有 probes 数组"]
+    if not isinstance(raw, list):
+        return [], [f"probes 应当是数组，实际是 {type(raw).__name__}"]
+    targets = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            problems.append(f"第 {index + 1} 项不是对象，已跳过")
+            continue
+        host, port = item.get("host"), item.get("port")
+        if not isinstance(host, str) or not host.strip():
+            problems.append(f"第 {index + 1} 项缺少可用的 host，已跳过")
+            continue
+        try:
+            port_number = int(port)
+        except (TypeError, ValueError):
+            problems.append(f"第 {index + 1} 项的 port 不是数字，已跳过")
+            continue
+        if not 1 <= port_number <= 65535:
+            problems.append(f"第 {index + 1} 项的 port 超出范围，已跳过")
+            continue
+        name = item.get("name")
+        targets.append({"name": name if isinstance(name, str) and name.strip() else host.strip(),
+                        "host": host.strip(), "port": port_number})
+    return targets, problems
+
+
 def parse_os_release(text):
     """把 /etc/os-release 解析成字典（去掉引号）。"""
     info = {}
@@ -957,6 +994,17 @@ class Collector:
         target_results = []
         while True:
             started = time.time()
+            try:
+                self._probe_once(started, targets_at, target_results)
+                targets_at = self._probe_at
+                target_results = self._probe.get("targets") or []
+            except Exception as exc:      # 探测失败只记一行，线程继续跑
+                print(f"[probe] 探测失败：{exc}", flush=True)
+            time.sleep(max(1.0, NET_PROBE_INTERVAL - (time.time() - started)))
+
+    def _probe_once(self, started, targets_at, target_results):
+        """跑一轮探测并写入 self._probe（拆出来便于兜底与测试）。"""
+        if True:
             gateway_ms = None
             if self._gateway:
                 for port in GATEWAY_PROBE_PORTS:
@@ -979,10 +1027,10 @@ class Collector:
                 ]
                 targets_at = started
 
+            self._probe_at = targets_at
             self._probe = {"gateway_ms": gateway_ms, "internet_ms": internet_ms,
                            "internet_target": NET_PROBE_TARGET, "at": time.time(),
                            "targets": target_results}
-            time.sleep(max(1.0, NET_PROBE_INTERVAL - (time.time() - started)))
 
     def probe_targets(self):
         """读取 probes.json 里的远程探测目标。
@@ -1000,19 +1048,9 @@ class Collector:
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
-            targets = []
-            for item in (data.get("probes") or []):
-                host = (item or {}).get("host")
-                port = (item or {}).get("port")
-                if not host or not port:
-                    continue
-                try:
-                    targets.append({"name": item.get("name") or str(host),
-                                    "host": str(host), "port": int(port)})
-                except (TypeError, ValueError):
-                    continue
-            self._probes_cache = (targets, None, mtime)
-        except (OSError, ValueError, TypeError) as exc:
+            targets, problems = parse_probe_targets(data)
+            self._probes_cache = (targets, "；".join(problems) if problems else None, mtime)
+        except Exception as exc:      # 解析异常绝不能外抛：会连带打死探测线程与整站采样
             self._probes_cache = ([], f"probes.json 读取失败：{exc}", mtime)
         return self._probes_cache
 
@@ -1503,8 +1541,8 @@ class Collector:
             entry["mac"] = mac
             if "arp" not in entry["sources"]:
                 entry["sources"].append("arp")
-            if entry.get("name") is None and not cache.get("hosts"):
-                entry["name"] = self._reverse_dns(ip)
+            # 名称只在后台扫描线程里解析：反向 DNS 可能很慢，
+            # 放在请求线程里会拖住 /api/device 并让其他请求排队等锁。
         for entry in devices.values():
             entry["vendor"] = oui_vendor(entry.get("mac"), table)
         hosts = sorted(devices.values(),
@@ -1522,7 +1560,7 @@ class Collector:
         }
 
     def _collect_device(self):
-        """设备页：本机摘要 + 与这台机器连接的设备（USB / 蓝牙 / 网络 / PCI）。"""
+        """设备页：本机摘要 + 与这台机器连接的设备（USB / 蓝牙 / 网络 / 局域网）。"""
         os_release = parse_os_release(self._read_sys("/etc/os-release"))
         cpuinfo = self._read_sys("/proc/cpuinfo") or ""
         caches = self._cpu_caches()

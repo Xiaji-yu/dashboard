@@ -145,6 +145,26 @@
     }
   }
 
+  /* 指标从「不可用」恢复时把曲线放出来：后端 RAPL 权限放开后功耗会自己恢复，
+     前端不能一直停在旧原因上（历史缺陷：setUnavailable 是单向的）。 */
+  function markAvailable(key) {
+    var inst = charts[key];
+    var value = document.getElementById('v-' + key);
+    if (value) value.classList.remove('na');
+    if (inst && inst.chart && inst.naReason) {
+      inst.chart.setAvailable();
+      inst.naReason = null;
+    }
+  }
+
+  function clearRecovered(ov) {
+    METRICS.forEach(function (spec) {
+      var inst = charts[spec.key];
+      var data = ov[spec.key];
+      if (inst && inst.naReason && data && data.available) markAvailable(spec.key);
+    });
+  }
+
   function renderMetrics(ov) {
     var cpu = ov.cpu;
     if (cpu.available) {
@@ -194,6 +214,7 @@
     } else {
       markUnavailable('disk', disk.reason);
     }
+    clearRecovered(ov);      // 之前不可用、现在恢复的指标，把曲线放回来
   }
 
   function renderProcesses(list, count) {

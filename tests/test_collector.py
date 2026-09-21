@@ -4,6 +4,7 @@
 所以每种失败都要有用例守着。
 """
 
+import io
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ import psutil
 
 import collector as collector_module
 from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, container_id_from_cgroup,
+                       parse_probe_targets,
                        format_khz, format_sockaddr, is_virtual_nic, is_wireless_nic, listen_ports,
                        listen_sockets, load_oui, oui_vendor, parse_arp_table, parse_cpu_flags,
                        parse_cpu_model, parse_default_gateway, parse_os_release,
@@ -403,13 +405,10 @@ class NetworkDiskInfoTest(unittest.TestCase):
             self.assertTrue(item["device"].startswith("/dev/"))
             self.assertNotIn("/dev/loop", item["device"], "snap 的 loop 挂载不该出现")
             self.assertNotEqual(item["fstype"], "squashfs")
-        # 只有根挂载真的落在 /sys/block 认得的块设备上（本机是 /dev/sda）才谈得上读写速率；
-        # CI 虚机的根是 /dev/root 或 overlay，这时速率如实为空，不该断言有值。
-        block = disk.get("block")
-        if block and os.path.exists(f"/sys/block/{block}"):
-            self.assertIsNotNone(disk["read_bps"], "第二次采样应当能算出读写速率")
-        else:
-            self.assertIsNone(disk["read_bps"], "认不出块设备时读写速率应当为空")
+        # 这里只校验字段齐全与挂载过滤；速率的有无取决于根挂载是否落在真实块设备上，
+        # 具体计算由 DiskRateCalculationTest 用夹具驱动（不再拿实现自己的输出当期望值）。
+        for key in ("read_bps", "write_bps", "read_total_gb", "write_total_gb"):
+            self.assertIn(key, disk, key)
 
     def test_series_values_include_disk_io(self):
         import server
@@ -526,7 +525,7 @@ class ProbeTargetsTest(unittest.TestCase):
     def test_missing_file_is_not_an_error(self):
         targets, error, _mtime = self.collector.probe_targets()
         self.assertEqual(targets, [])
-        self.assertIsNone(error)
+        self.assertIsNone(error, "文件不存在时不该报错")
 
     def test_parses_targets_and_skips_incomplete(self):
         with open(self.path, "w", encoding="utf-8") as handle:
@@ -536,7 +535,8 @@ class ProbeTargetsTest(unittest.TestCase):
                 {"host": "9.9.9.9", "port": "53"},
             ]}, handle)
         targets, error, _mtime = self.collector.probe_targets()
-        self.assertIsNone(error)
+        # 现在会明确告诉用户哪一项被跳过，而不是静默丢弃
+        self.assertIn("第 2 项", error)
         self.assertEqual(len(targets), 2)
         self.assertEqual(targets[0], {"name": "腾讯云", "host": "1.2.3.4", "port": 443})
         self.assertEqual(targets[1]["name"], "9.9.9.9", "没有名字就用 host")
@@ -1020,3 +1020,150 @@ class DegradationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ProbeTargetParsingTest(unittest.TestCase):
+    """probes.json 的校验必须只记录问题、绝不抛异常（否则会连带冻结整站采样）。"""
+
+    def test_valid_file(self):
+        targets, problems = parse_probe_targets({
+            "probes": [{"name": "百度", "host": "www.baidu.com", "port": 443},
+                       {"host": " 1.1.1.1 ", "port": "53"}]})
+        self.assertEqual(problems, [])
+        self.assertEqual(targets[0], {"name": "百度", "host": "www.baidu.com", "port": 443})
+        self.assertEqual(targets[1]["host"], "1.1.1.1", "host 要去空白")
+        self.assertEqual(targets[1]["port"], 53, "字符串端口要转成整数")
+        self.assertEqual(targets[1]["name"], "1.1.1.1", "没有 name 时用 host")
+
+    def test_bad_shapes_return_problems_instead_of_raising(self):
+        cases = [
+            (["not", "an", "object"], "顶层应当是对象"),
+            ("a string", "顶层应当是对象"),
+            (123, "顶层应当是对象"),
+            ({}, "没有 probes 数组"),
+            ({"probes": "not-a-list"}, "probes 应当是数组"),
+            ({"probes": {"host": "x"}}, "probes 应当是数组"),
+        ]
+        for data, expected in cases:
+            with self.subTest(data=data):
+                targets, problems = parse_probe_targets(data)
+                self.assertEqual(targets, [])
+                self.assertTrue(any(expected in item for item in problems),
+                                f"{data} -> {problems}")
+
+    def test_skips_bad_entries_with_reasons(self):
+        targets, problems = parse_probe_targets({"probes": [
+            "字符串元素",
+            {"host": "ok.example", "port": 80},
+            {"port": 80},
+            {"host": "x", "port": "abc"},
+            {"host": "x", "port": 70000},
+            {"host": "x", "port": 0},
+            {"host": "   ", "port": 80},
+            {"host": ["not", "str"], "port": 80},
+        ]})
+        self.assertEqual([item["host"] for item in targets], ["ok.example"])
+        self.assertEqual(len(problems), 7, problems)
+
+    def test_probe_targets_survives_malformed_file(self):
+        """真实文件是顶层数组时，方法应当返回空列表 + 说明，而不是抛 AttributeError。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bad = os.path.join(tmp.name, "probes.json")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write('[{"name": "x"}]')
+        with mock.patch.dict(os.environ, {"DASHBOARD_PROBES": bad}):
+            collector = Collector()
+            targets, error, _mtime = collector.probe_targets()
+        self.assertEqual(targets, [])
+        self.assertIn("顶层应当是对象", error)
+
+
+class SamplerResilienceTest(unittest.TestCase):
+    """某一项采集失败时，快照仍必须继续发布（否则页面数字会永久停住）。"""
+
+    def test_snapshot_published_even_when_services_fail(self):
+        import server
+        collector = Collector()
+        collector.sample()
+        with mock.patch.object(Collector, "services_detail",
+                               side_effect=AttributeError("boom")), \
+                mock.patch.object(Collector, "network_info",
+                                  side_effect=OSError("net boom")), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            snapshot = server.sample_once(collector)
+        self.assertIsNotNone(snapshot)
+        self.assertGreater(snapshot["ts"], 0)
+        with server.state_lock:
+            self.assertEqual(server.state["snapshot"]["ts"], snapshot["ts"],
+                             "快照必须照常发布")
+        text = out.getvalue()
+        self.assertIn("服务信息失败", text)
+        self.assertIn("网络信息失败", text)
+
+    def test_lan_devices_does_not_resolve_dns_in_request_path(self):
+        """反向 DNS 只能在后台扫描线程里做：放请求线程会拖住 /api/device 并占着锁。"""
+        collector = Collector()
+        with mock.patch.object(Collector, "_reverse_dns",
+                               side_effect=AssertionError("请求线程里不该解析 DNS")):
+            result = collector.lan_devices()
+        self.assertIn("hosts", result)
+
+class DiskRateCalculationTest(unittest.TestCase):
+    """读写速率用夹具驱动：期望值来自构造的计数差，而不是实现自己的输出。
+
+    历史问题：修 CI 时把断言写成「有 block 就期望有速率」，而 block 正是实现算出来的，
+    于是这组断言在 NVMe/MMC 根盘上等于空跑，永远绿。
+    """
+
+    @staticmethod
+    def _counters(read_bytes, write_bytes):
+        return SimpleNamespace(read_bytes=read_bytes, write_bytes=write_bytes)
+
+    def _collector(self):
+        collector = Collector.__new__(Collector)
+        collector._disk_io_prev = None
+        return collector
+
+    def test_rates_are_delta_over_elapsed(self):
+        collector = self._collector()
+        with mock.patch.object(Collector, "_disk_static", return_value={"block": "sda"}), \
+                mock.patch("psutil.disk_io_counters",
+                           return_value={"sda": self._counters(1000, 500)}):
+            first = collector._disk_io(1000.0)
+        self.assertIsNone(first["read_bps"], "第一次只建立基准")
+        self.assertEqual(first["read_total_gb"], round(1000 / 1024 ** 3, 2))
+
+        with mock.patch.object(Collector, "_disk_static", return_value={"block": "sda"}), \
+                mock.patch("psutil.disk_io_counters",
+                           return_value={"sda": self._counters(3000, 1500)}):
+            second = collector._disk_io(1002.0)
+        self.assertEqual(second["read_bps"], 1000.0, "2 秒读了 2000 字节")
+        self.assertEqual(second["write_bps"], 500.0)
+
+    def test_counter_reset_does_not_produce_negative_rate(self):
+        collector = self._collector()
+        with mock.patch.object(Collector, "_disk_static", return_value={"block": "sda"}), \
+                mock.patch("psutil.disk_io_counters",
+                           return_value={"sda": self._counters(5000, 5000)}):
+            collector._disk_io(1000.0)
+        with mock.patch.object(Collector, "_disk_static", return_value={"block": "sda"}), \
+                mock.patch("psutil.disk_io_counters",
+                           return_value={"sda": self._counters(10, 10)}):
+            out = collector._disk_io(1001.0)
+        self.assertEqual(out["read_bps"], 0.0, "计数器回绕不该算出负数")
+
+    def test_no_block_device_means_no_rates(self):
+        """虚机的根是 /dev/root 或 overlay：认不出块设备时如实为空。"""
+        collector = self._collector()
+        with mock.patch.object(Collector, "_disk_static", return_value={"block": None}):
+            out = collector._disk_io(1000.0)
+        for key in ("read_bps", "write_bps", "read_total_gb", "write_total_gb"):
+            self.assertIsNone(out[key], key)
+
+    def test_block_missing_from_counters(self):
+        collector = self._collector()
+        with mock.patch.object(Collector, "_disk_static", return_value={"block": "sdz"}), \
+                mock.patch("psutil.disk_io_counters", return_value={}):
+            out = collector._disk_io(1000.0)
+        self.assertIsNone(out["read_bps"])
+        self.assertIsNone(out["write_total_gb"])

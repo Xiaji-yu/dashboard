@@ -40,12 +40,33 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from auth import SESSION_TTL, AuthStore, auth_file_path
+from auth import SESSION_TTL, AuthConfigError, AuthStore, auth_file_path
 from collector import Collector
 from history import History, WINDOW_SECONDS
 
 SESSION_COOKIE = "dsh_session"
 MAX_BODY_BYTES = 8192
+
+
+def trust_proxy():
+    """是否信任反向代理发来的 X-Forwarded-For。
+
+    默认关闭：否则任何人都能伪造该头绕过登录限速。
+    部署在 Nginx/Caddy 后面时设 DASHBOARD_TRUST_PROXY=1（见 deploy/README.md）。
+    """
+    return os.environ.get("DASHBOARD_TRUST_PROXY", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def client_ip(headers, peer, trust=False):
+    """取真实来源 IP：只有显式信任代理时才看 X-Forwarded-For / X-Real-IP。"""
+    if trust:
+        forwarded = headers.get("X-Forwarded-For") or headers.get("X-Real-IP")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+    return peer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -118,29 +139,54 @@ def series_values(snapshot):
     }
 
 
+def sample_once(collector):
+    """跑一轮采集并发布到 state（拆出来便于测试与逐段兜底）。
+
+    关键点：任何一段失败都只丢那一段，**快照本身照常发布**。
+    否则像 services_detail() 抛异常这种小问题会让整站数字永久停住。
+    """
+    snapshot = collector.sample()
+    try:
+        rows = collector.process_list()
+    except Exception as exc:
+        print(f"[collector] 进程列表失败：{exc}", flush=True)
+        with state_lock:
+            rows = state.get("processes") or []
+    snapshot["processes"] = rows[:6]
+    snapshot["process_count"] = len(rows)
+
+    try:
+        network = collector.network_info()
+    except Exception as exc:
+        print(f"[collector] 网络信息失败：{exc}", flush=True)
+        network = None
+    try:
+        services = collector.services_detail()
+    except Exception as exc:
+        print(f"[collector] 服务信息失败：{exc}", flush=True)
+        services = None
+
+    with state_lock:
+        if network is not None:
+            state["network"] = network
+        if services is not None:
+            state["services"] = services
+        state["snapshot"] = snapshot
+        state["series_ts"] = snapshot["ts"]
+        state["processes"] = rows
+        for key, value in series_values(snapshot).items():
+            state["history"].append(key, snapshot["ts"], value)
+        for key, value in performance_series(snapshot).items():
+            state["history"].append(key, snapshot["ts"], value)
+    return snapshot
+
+
 def sampler(collector):
     """后台采样线程：即使单次采集失败也继续跑。"""
     while True:
         started = time.time()
         try:
-            snapshot = collector.sample()
-            rows = collector.process_list()
-            # 完整进程表放在 state 里单独服务 /api/processes，
-            # 概览快照只留前 6 条，避免每次轮询都拖着 30KB 的列表。
-            snapshot["processes"] = rows[:6]
-            snapshot["process_count"] = len(rows)
-            network = collector.network_info()
-            services = collector.services_detail()
-            with state_lock:
-                state["snapshot"] = snapshot
-                state["series_ts"] = snapshot["ts"]
-                state["processes"] = rows
-                state["network"] = network
-                state["services"] = services
-                for key, value in series_values(snapshot).items():
-                    state["history"].append(key, snapshot["ts"], value)
-                for key, value in performance_series(snapshot).items():
-                    state["history"].append(key, snapshot["ts"], value)
+            sample_once(collector)
         except Exception as exc:  # 采集异常不应终止采样
             print(f"[collector] 采样失败：{exc}", flush=True)
         time.sleep(max(0.05, INTERVAL - (time.time() - started)))
@@ -186,16 +232,48 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-    def _read_json(self):
-        """读请求体并解析 JSON；超过上限或格式不对返回 None。"""
+    def _read_body(self):
+        """把请求体整块读掉（含超长时读满上限后关连接）。
+
+        必须真的排空：HTTP/1.1 是长连接，没读掉的字节会被当成下一条请求行，
+        被 log_message 原样打出来——登录密码就这么明文进过日志。
+        """
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            return None
-        if length <= 0 or length > MAX_BODY_BYTES:
+            self.close_connection = True
+            return b""
+        if length <= 0:
+            return b""
+        if length > MAX_BODY_BYTES:
+            self.close_connection = True          # 超出上限的剩余部分不再留在连接里
+            length = MAX_BODY_BYTES
+            return self._read_exactly(length)
+        return self._read_exactly(length)
+
+    def _read_exactly(self, length):
+        chunks = []
+        remaining = length
+        while remaining > 0:
+            try:
+                chunk = self.rfile.read(min(remaining, 4096))
+            except OSError:
+                self.close_connection = True
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _read_json(self, raw=None):
+        """解析请求体 JSON；raw 为 None 时自行读取。格式不对返回 None。"""
+        if raw is None:
+            raw = self._read_body()
+        if not raw or len(raw) > MAX_BODY_BYTES:
             return None
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
+            return json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return None
 
@@ -212,12 +290,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote(urlparse(self.path).path)
+        raw = self._read_body()          # 无论结果如何都要读掉，避免密码被当成请求行回显到日志
         if path not in ("/api/login", "/api/logout", "/api/password"):
             return self.send_error(404)
         if not self._post_allowed():
             return self._send_json(
                 {"error": "forbidden", "message": "需要同源 JSON 请求"}, status=403)
-        payload = self._read_json()
+        payload = self._read_json(raw)
         if not isinstance(payload, dict):
             return self._send_json(
                 {"error": "bad_request", "message": "请求体需要是 JSON 对象"}, status=400)
@@ -227,7 +306,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/logout":
             token = self._token()
             if self.auth:
-                if payload.get("all"):
+                if payload.get("all") is True:
                     self.auth.logout_all()          # 退出所有设备（含当前）
                 elif token:
                     self.auth.logout(token)
@@ -237,16 +316,27 @@ class Handler(BaseHTTPRequestHandler):
     def _login(self, payload):
         if self.auth is None:
             return self._send_json({"error": "auth_disabled"}, status=503)
-        ip = self.client_address[0]
+        username = payload.get("username")
+        password = payload.get("password")
+        # 非字符串（数组/对象/数字）直接拒掉：别让它一路走到 .strip()/.encode() 抛异常
+        if not isinstance(username, str) or not isinstance(password, str):
+            return self._send_json(
+                {"error": "bad_request", "message": "账号与密码都必须是字符串"}, status=400)
+
+        ip = client_ip(self.headers, self.client_address[0], trust_proxy())
         wait = self.auth.retry_after(ip)
         if wait:
             return self._send_json(
                 {"error": "rate_limited",
-                 "message": f"失败次数过多，请 {wait} 秒后再试"}, status=429)
-        token = self.auth.login(payload.get("username"), payload.get("password"), ip)
+                 "message": f"失败次数过多，请 {wait} 秒后再试"},
+                status=429, extra_headers={"Retry-After": str(wait)})
+        token = self.auth.login(username, password, ip)
         if not token:
+            # 记下来源与账号（不含密码），方便发现有人在猜口令
+            print(f"[auth] 登录失败 ip={ip} user={username[:32]!r}", flush=True)
             return self._send_json(
                 {"error": "invalid_credentials", "message": "账号或密码不正确"}, status=401)
+        print(f"[auth] 登录成功 ip={ip} user={self.auth.username()}", flush=True)
         return self._send_json({"ok": True, "username": self.auth.username()},
                                cookies=[self._session_cookie(token)])
 
@@ -409,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- 响应 ----------------
 
-    def _send_json(self, payload, status=200, cookies=None):
+    def _send_json(self, payload, status=200, cookies=None, extra_headers=None):
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -417,6 +507,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         for cookie in cookies or ():
             self.send_header("Set-Cookie", cookie)
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -483,11 +575,15 @@ def lan_address():
 
 
 def main():
-    auth_store = AuthStore(
-        auth_file_path(),
-        username=os.environ.get("DASHBOARD_USER"),
-        password=os.environ.get("DASHBOARD_PASSWORD"),
-        logger=lambda message: print(message, flush=True))
+    try:
+        auth_store = AuthStore(
+            auth_file_path(),
+            username=os.environ.get("DASHBOARD_USER"),
+            password=os.environ.get("DASHBOARD_PASSWORD"),
+            logger=lambda message: print(message, flush=True))
+    except AuthConfigError as exc:
+        # 凭据读不到或损坏时宁可不启动，也不能静默重建覆盖原账号
+        raise SystemExit(f"凭据不可用，服务未启动：\n{exc}")
     collector = Collector()
     threading.Thread(target=sampler, args=(collector,), daemon=True).start()
     # 延迟探测单独一个线程：连接超时不该拖慢 1 秒采样

@@ -80,3 +80,18 @@ jobs:
           curl -fsS -b /tmp/ci-cookies -o /dev/null http://127.0.0.1:8282/static/app.js
           curl -fsS -b /tmp/ci-cookies -o /dev/null http://127.0.0.1:8282/static/pages/device.js
           echo "静态资源 OK（已登录）"
+
+  frontend:
+    name: 前端图表测试（Node）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 图表库回归测试
+        run: node tests/chart.test.js

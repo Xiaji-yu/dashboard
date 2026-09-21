@@ -13,7 +13,10 @@
 | 初始凭据 | 首次启动生成随机 20 位密码，写入 `auth.json` 并打印到日志；可用 `DASHBOARD_USER` / `DASHBOARD_PASSWORD` 指定 |
 | 会话 | 服务端保存的随机令牌（`secrets.token_urlsafe(32)`），Cookie 为 `HttpOnly; SameSite=Lax`，默认 7 天，最多 20 个 |
 | 改密码 | 需旧密码；改完踢掉其他设备的会话，当前设备保留 |
-| 暴力破解 | 按来源 IP 限速：5 分钟内 5 次失败后拒绝，成功登录清零 |
+| 暴力破解 | 按来源 IP 限速：5 分钟内 5 次失败后拒绝（带 `Retry-After`），成功登录清零；失败会记一条日志（来源 IP + 账号，不含密码） |
+| 反向代理 | 只有在设了 `DASHBOARD_TRUST_PROXY=1` 时才采信 `X-Forwarded-For`/`X-Real-IP`；默认不信任，防止伪造头绕过限速 |
+| 凭据文件 | 只存口令哈希与会话令牌，权限 600；读不到或损坏时**拒绝启动并留备份**（`auth.json.corrupt-*`），绝不静默重建覆盖 |
+| 日志 | 初始口令会打印一次；journald 仅特权可读，`run.sh` 会把 `server.log` 设为 600 |
 | CSRF | 状态变更接口要求 `Content-Type: application/json`（跨站表单发不出来），`Origin` 存在时必须同源 |
 
 ## 还没做的

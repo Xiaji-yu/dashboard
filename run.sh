@@ -2,14 +2,20 @@
 # 8282 总控台 启停脚本
 set -euo pipefail
 
+# 日志里可能出现首次启动的初始口令，pid 文件也不该人人可写：
+# 一律按 600 创建（后面的 chmod 只是兜底已有的旧文件）。
+umask 077
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$DIR/server.pid"
 LOG_FILE="$DIR/server.log"
 PORT="${DASHBOARD_PORT:-8282}"
 HOST="${DASHBOARD_HOST:-0.0.0.0}"
-PATTERN="python3 $DIR/server.py"
-
-# 优先用 pid 文件；失效时按命令行匹配兜底（setsid 后 pid 可能不易追踪）
+# 优先用 pid 文件；失效时按命令行**精确**匹配兜底（setsid 后 pid 可能不易追踪）。
+#
+# 这里不能用 pgrep -f "$PATTERN"：它会匹配任何命令行里含这段文字的进程，
+# 包括正在执行本脚本的 shell、编辑器、甚至 tail 日志的终端，
+# 实测会把调用者自己当成服务杀掉。精确比较整条命令行才安全。
 find_pid() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
@@ -19,7 +25,14 @@ find_pid() {
       return 0
     fi
   fi
-  pgrep -f "$PATTERN" 2>/dev/null | head -1
+  local pid args
+  while read -r pid args; do
+    if [[ "$args" == "python3 $DIR/server.py" ]]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+  done < <(ps -eo pid=,args= 2>/dev/null)
+  return 1
 }
 
 case "${1:-start}" in
@@ -30,6 +43,7 @@ case "${1:-start}" in
       exit 0
     fi
     cd "$DIR"
+    touch "$LOG_FILE"; chmod 600 "$LOG_FILE" 2>/dev/null || true
     # setsid：脱离当前会话/进程组，避免父进程被杀时把服务一起带走（nohup 挡不住进程组信号）
     if command -v setsid >/dev/null 2>&1; then
       DASHBOARD_HOST="$HOST" DASHBOARD_PORT="$PORT" \
@@ -42,6 +56,7 @@ case "${1:-start}" in
     pid="$(find_pid || true)"
     if [[ -n "$pid" ]]; then
       echo "$pid" > "$PID_FILE"
+      chmod 600 "$PID_FILE" 2>/dev/null || true
       echo "已启动：http://127.0.0.1:$PORT/  （PID $pid，日志 $LOG_FILE）"
     else
       echo "启动失败，日志末尾："

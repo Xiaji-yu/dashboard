@@ -167,6 +167,20 @@
         host.appendChild(na);
       },
 
+      /** 指标恢复可用：撤掉提示、放回曲线并重绘。
+       *  没有这一步，「不可用」就是单向状态——像 RAPL 权限放开后功耗恢复，
+       *  页面却一直锁着旧原因不显示曲线。返回是否真的恢复过。 */
+      setAvailable: function () {
+        if (!na) return false;
+        na.remove();
+        na = null;
+        svg.style.display = '';
+        return true;
+      },
+
+      /** 当前是否处于「不可用」状态（供页面判断要不要走恢复分支） */
+      unavailable: function () { return Boolean(na); },
+
       /** 重绘，返回最近一次绘制的峰值（供量程标注使用） */
       redraw: function (serverTs) {
         if (serverTs) lastTs = serverTs;

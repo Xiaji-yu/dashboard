@@ -6,9 +6,11 @@ import stat
 import tempfile
 import time
 import unittest
+from unittest import mock
 
-from auth import (LOGIN_MAX_FAILURES, PASSWORD_MIN_LENGTH, SESSION_TTL, AuthStore,
-                  generate_password, hash_password, verify_password)
+from auth import (LOGIN_MAX_FAILURES, MAX_TRACKED_IPS, PASSWORD_MIN_LENGTH,
+                  SESSION_SAVE_INTERVAL, SESSION_TTL, AuthConfigError, AuthStore,
+                  generate_password, hash_password, password_record_ok, verify_password)
 
 PASSWORD = "initial-pass-1"
 
@@ -112,7 +114,6 @@ class AuthStoreTest(unittest.TestCase):
     def test_change_password_keeps_current_drops_others(self):
         mine = self.store.login("admin", PASSWORD, "7.7.7.7")
         other = self.store.login("admin", PASSWORD, "8.8.8.8")
-        self.world = None
         self.assertIsNotNone(self.store.session(other))
         ok, message = self.store.change_credentials(mine, PASSWORD, "brand-new-pass-2")
         self.assertTrue(ok, message)
@@ -165,3 +166,139 @@ class AuthStoreTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class CredentialFileSafetyTest(unittest.TestCase):
+    """凭据文件读不到/损坏时**绝不能**静默重建覆盖（会让原账号口令永久丢失）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "auth.json")
+        self.logs = []
+        self.store = AuthStore(self.path, username="admin", password=PASSWORD,
+                               logger=self.logs.append)
+        self.original = open(self.path, encoding="utf-8").read()
+        self.since = len(self.logs)        # 只看重新打开之后产生的日志
+
+    def _reopen(self, **kwargs):
+        return AuthStore(self.path, logger=self.logs.append, **kwargs)
+
+    def test_unreadable_file_refuses_instead_of_overwriting(self):
+        os.chmod(self.path, 0o000)
+        self.addCleanup(os.chmod, self.path, 0o600)
+        with self.assertRaises(AuthConfigError) as ctx:
+            self._reopen()
+        self.assertIn("读不到", str(ctx.exception))
+        os.chmod(self.path, 0o600)
+        self.assertEqual(open(self.path, encoding="utf-8").read(), self.original,
+                         "读失败时原文件必须原封不动")
+
+    def test_corrupt_json_is_quarantined_not_replaced(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(self.original[: len(self.original) // 2])   # 截断
+        with self.assertRaises(AuthConfigError) as ctx:
+            self._reopen()
+        self.assertIn("解析失败", str(ctx.exception))
+        backups = [name for name in os.listdir(self.tmp.name) if ".corrupt-" in name]
+        self.assertEqual(len(backups), 1, "损坏文件要另存一份")
+        self.assertIn("corrupt", str(ctx.exception))
+        self.assertTrue(open(os.path.join(self.tmp.name, backups[0]),
+                             encoding="utf-8").read().startswith("{"))
+        self.assertFalse(any("首次启动" in line for line in self.logs[self.since:]),
+                         "损坏时不该谎报首次启动")
+
+    def test_incomplete_record_is_treated_as_damaged(self):
+        """有 username 但口令记录缺 hash：这种文件会让登录永远失败，必须当成损坏。"""
+        import json as jsonlib
+        data = jsonlib.loads(self.original)
+        del data["password"]["hash"]
+        with open(self.path, "w", encoding="utf-8") as handle:
+            jsonlib.dump(data, handle)
+        with self.assertRaises(AuthConfigError) as ctx:
+            self._reopen()
+        self.assertIn("记录不完整", str(ctx.exception))
+
+    def test_valid_file_is_loaded_without_regenerating(self):
+        again = self._reopen(username="someone-else", password="env-pass-1234")
+        self.assertEqual(again.username(), "admin")
+        self.assertTrue(verify_password(PASSWORD, again.data["password"]))
+        self.assertFalse(any("首次启动" in line for line in self.logs[self.since:]))
+
+    def test_missing_file_still_creates_credentials(self):
+        fresh = os.path.join(self.tmp.name, "new.json")
+        logs = []
+        store = AuthStore(fresh, logger=logs.append)
+        self.assertTrue(os.path.exists(fresh))
+        line = [item for item in logs if "首次启动" in item][0]
+        secret = line.split(" / ")[-1].strip()
+        self.assertIsNotNone(store.login("admin", secret, "7.7.7.7"))
+
+    def test_password_record_ok(self):
+        self.assertTrue(password_record_ok(hash_password("x")))
+        self.assertFalse(password_record_ok(None))
+        self.assertFalse(password_record_ok({}))
+        self.assertFalse(password_record_ok({"algo": "pbkdf2_sha256"}))
+        broken = hash_password("x")
+        broken["hash"] = "!!!"
+        self.assertFalse(password_record_ok(broken))
+        wrong_algo = hash_password("x")
+        wrong_algo["algo"] = "md5"
+        self.assertFalse(password_record_ok(wrong_algo))
+
+    def test_verify_password_rejects_non_string_input(self):
+        record = hash_password("x")
+        for bad in (None, 123, b"x", ["x"], {"a": 1}):
+            self.assertFalse(verify_password(bad, record), bad)
+
+    def test_login_rejects_non_string_credentials_without_raising(self):
+        self.assertIsNone(self.store.login({"a": 1}, PASSWORD, "1.2.3.4"))
+        self.assertIsNone(self.store.login("admin", ["x"], "1.2.3.4"))
+        self.assertIsNone(self.store.login(None, None, "1.2.3.4"))
+        self.assertIsNone(self.store.session(["not-a-token"]))
+
+    def test_temp_file_is_created_private(self):
+        """临时文件里含全部会话令牌，创建时就该是 0600，不能先 0644 再 chmod。"""
+        seen = []
+        real_replace = os.replace
+
+        def spy_replace(src_path, dst_path):
+            seen.append(oct(os.stat(src_path).st_mode & 0o777))
+            return real_replace(src_path, dst_path)
+
+        with mock.patch("auth.os.replace", side_effect=spy_replace):
+            self.store.login("admin", PASSWORD, "5.5.5.5")
+        self.assertTrue(seen, "应当发生一次原子替换")
+        self.assertEqual(seen[0], "0o600", f"临时文件权限应从一开始就是 600，实际 {seen[0]}")
+
+    def test_session_touch_is_throttled_but_persisted(self):
+        token = self.store.login("admin", PASSWORD, "6.6.6.6")
+        with mock.patch.object(AuthStore, "_save", autospec=True) as save:
+            self.store.session(token)
+            save.assert_not_called()
+            self.store._last_save = time.time() - SESSION_SAVE_INTERVAL - 1
+            self.store.session(token)
+            save.assert_called_once()
+
+    def test_failure_table_is_bounded(self):
+        for index in range(MAX_TRACKED_IPS + 200):
+            self.store._record_failure(f"10.0.{index // 250}.{index % 250}")
+        self.assertLessEqual(len(self.store._failures), MAX_TRACKED_IPS + 200)
+        self.assertLess(len(self.store._failures), MAX_TRACKED_IPS + 201)
+
+
+class AuthConfigErrorUsageTest(unittest.TestCase):
+    def test_main_exits_cleanly_on_bad_credentials_file(self):
+        """server.main() 遇到凭据损坏要给出可读提示并退出，而不是抛 traceback。"""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        bad = os.path.join(tmp.name, "auth.json")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write("{ not json")
+        env = mock.patch.dict(os.environ, {"DASHBOARD_AUTH_FILE": bad},
+                              clear=False)
+        env.start()
+        self.addCleanup(env.stop)
+        import server
+        with self.assertRaises(SystemExit) as ctx:
+            server.main()
+        self.assertIn("凭据不可用", str(ctx.exception))

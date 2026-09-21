@@ -4,13 +4,16 @@
 所以不需要联网，也不会和在跑的 8282 抢端口。
 """
 
+import contextlib
 import http.client
+import io
 import json
 import os
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import server
 from auth import AuthStore
@@ -351,10 +354,11 @@ class AuthFlowTest(unittest.TestCase):
         self.httpd.server_close()
         self.thread.join(timeout=5)
 
-    def raw(self, method, path, payload=None, cookie=None, content_type="application/json"):
+    def raw(self, method, path, payload=None, cookie=None, content_type="application/json",
+            extra_headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            headers = {}
+            headers = dict(extra_headers or {})
             if cookie:
                 headers["Cookie"] = cookie
             body = None
@@ -469,10 +473,114 @@ class AuthFlowTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("当前密码不正确", json.loads(body)["message"])
 
+    def test_rejected_post_body_is_not_logged(self):
+        """被拒的 POST 必须把请求体读掉：否则 keep-alive 会把密码当成下一行请求回显到日志。"""
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            status, _headers, _body = self.raw(
+                "POST", "/api/login",
+                {"username": "tester", "password": "LEAKPROBE-12345"},
+                content_type="application/x-www-form-urlencoded")
+            time.sleep(0.2)
+        self.assertEqual(status, 403)
+        self.assertNotIn("LEAKPROBE-12345", captured.getvalue(),
+                         "密码不该出现在日志里")
+
+    def test_non_string_credentials_are_rejected_cleanly(self):
+        for payload in ({"username": {"a": 1}, "password": "x"},
+                        {"username": "tester", "password": ["x"]},
+                        {"username": 12345, "password": "x"}):
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                status, headers, body = self.raw("POST", "/api/login", payload)
+                time.sleep(0.05)
+            self.assertEqual(status, 400, payload)
+            self.assertIn("application/json", headers.get("content-type", ""))
+            self.assertIn("字符串", json.loads(body)["message"])
+            self.assertNotIn("Traceback", captured.getvalue())
+
+    def test_logout_all_requires_strict_true(self):
+        _status, first, _body = self.login()
+        _status, second, _body = self.login()
+        one = (first.get("set-cookie") or "").split(";")[0]
+        two = (second.get("set-cookie") or "").split(";")[0]
+        # "false" 不是 True，不该退出全部设备
+        status, _headers, _body = self.raw("POST", "/api/logout", {"all": "false"}, cookie=one)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.raw("GET", "/api/overview", cookie=two)[0], 200,
+                         "字符串 \"false\" 不该踢掉其他设备")
+        self.assertEqual(self.raw("GET", "/api/overview", cookie=one)[0], 401,
+                         "调用方自己确实退出了")
+        # 明确传 true 时才退出全部
+        _status, third, _body = self.login()
+        three = (third.get("set-cookie") or "").split(";")[0]
+        self.raw("POST", "/api/logout", {"all": True}, cookie=three)
+        self.assertEqual(self.raw("GET", "/api/overview", cookie=two)[0], 401)
+        self.assertEqual(self.raw("GET", "/api/overview", cookie=three)[0], 401)
+
+    def test_rate_limited_response_carries_retry_after(self):
+        for _ in range(5):
+            self.login("wrong-password")
+        status, headers, body = self.login("wrong-password")
+        self.assertEqual(status, 429)
+        self.assertTrue(headers.get("retry-after", "").isdigit(),
+                        f"应当带 Retry-After，实际 {headers.get('retry-after')!r}")
+        self.assertGreater(int(headers["retry-after"]), 0)
+
+    def test_failed_login_is_logged_without_password(self):
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.login("MY-SECRET-PASSWORD-42")
+            time.sleep(0.2)
+        log = captured.getvalue()
+        self.assertIn("[auth] 登录失败", log)
+        self.assertIn("ip=127.0.0.1", log)
+        self.assertNotIn("MY-SECRET-PASSWORD-42", log, "日志里不能出现密码")
+
+    def test_forwarded_header_is_ignored_by_default(self):
+        """默认不信任 X-Forwarded-For：伪造它不能绕过限速。"""
+        for index in range(5):
+            status, _headers, _body = self.raw(
+                "POST", "/api/login", {"username": "tester", "password": "wrong"},
+                extra_headers={"X-Forwarded-For": f"10.9.{index}.1"})
+            self.assertEqual(status, 401)
+        status, _headers, _body = self.raw(
+            "POST", "/api/login", {"username": "tester", "password": "wrong"},
+            extra_headers={"X-Forwarded-For": "10.9.99.1"})
+        self.assertEqual(status, 429, "换伪造 IP 也应被限速（按真实对端计数）")
+
+
     def test_change_password_needs_session(self):
         status, _headers, _body = self.raw("POST", "/api/password", {
             "old_password": self.PASSWORD, "new_password": "brand-new-pass-2"})
         self.assertEqual(status, 401)
+
+
+class ClientIpTest(unittest.TestCase):
+    """来源 IP 的取值规则（纯函数，便于直接断言）。"""
+
+    def test_default_ignores_forwarded_headers(self):
+        self.assertEqual(server.client_ip({"X-Forwarded-For": "1.2.3.4"},
+                                          "10.0.0.9", trust=False), "10.0.0.9")
+        self.assertEqual(server.client_ip({"X-Real-IP": "1.2.3.4"},
+                                          "10.0.0.9", trust=False), "10.0.0.9")
+
+    def test_trusted_proxy_reads_first_hop(self):
+        self.assertEqual(server.client_ip({"X-Forwarded-For": "1.2.3.4, 5.6.7.8"},
+                                          "10.0.0.9", trust=True), "1.2.3.4")
+        self.assertEqual(server.client_ip({"X-Real-IP": "9.9.9.9"},
+                                          "10.0.0.9", trust=True), "9.9.9.9")
+        self.assertEqual(server.client_ip({}, "10.0.0.9", trust=True), "10.0.0.9")
+        self.assertEqual(server.client_ip({"X-Forwarded-For": " , "},
+                                          "10.0.0.9", trust=True), "10.0.0.9")
+
+    def test_trust_proxy_reads_env_at_call_time(self):
+        with mock.patch.dict(os.environ, {"DASHBOARD_TRUST_PROXY": "1"}):
+            self.assertTrue(server.trust_proxy())
+        with mock.patch.dict(os.environ, {"DASHBOARD_TRUST_PROXY": "off"}):
+            self.assertFalse(server.trust_proxy())
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(server.trust_proxy())
 
 
 class OverviewBeforeFirstSampleTest(unittest.TestCase):

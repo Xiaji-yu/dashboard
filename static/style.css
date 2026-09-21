@@ -1349,6 +1349,13 @@ body {
 
 .empty .dim { color: var(--dim); }
 
+/* 局域网行的固定列宽合计 380px：901–1200px 这一档收起来源标签列，
+   否则窄一点的横屏里网格轨道会溢出卡片（内部会横向裁切）。 */
+@media (min-width: 901px) and (max-width: 1200px) {
+  .lan-row { grid-template-columns: 46px 104px minmax(0, 1fr) 124px; }
+  .lan-tags { display: none; }
+}
+
 @media (max-width: 900px) {
   .dev-grid { grid-template-columns: 1fr; grid-template-rows: none; }
   .list-rows { overflow: visible; }

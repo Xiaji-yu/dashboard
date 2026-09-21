@@ -14,10 +14,18 @@ function makeElement(name) {
     attrs: {},
     children: [],
     style: {},
+    parentNode: null,
     setAttribute: function (key, value) { this.attrs[key] = String(value); },
     getAttribute: function (key) { return this.attrs[key]; },
-    appendChild: function (child) { this.children.push(child); return child; },
-    remove: function () {}
+    appendChild: function (child) { child.parentNode = this; this.children.push(child); return child; },
+    /* 要真的从父节点摘掉：setUnavailable/setAvailable 的恢复路径靠它 */
+    remove: function () {
+      if (!this.parentNode) return;
+      var list = this.parentNode.children;
+      var index = list.indexOf(this);
+      if (index >= 0) list.splice(index, 1);
+      this.parentNode = null;
+    }
   };
 }
 
@@ -138,6 +146,30 @@ test('窗口外的旧点被裁掉', function () {
   m.chart.append('a', [[100, 99], [120, 20], [121, 30]]);
   var peak = m.chart.redraw(121);  /* 121-10=111，100 那个点应当被裁掉 */
   assertEqual(peak, 30, '裁掉旧点后的峰值：');
+});
+
+test('setUnavailable 后可恢复：撤掉提示、放回曲线并重绘', function () {
+  var m = mount({ series: [{ key: 'x', color: '#fff', fill: true }], window: 120 });
+  m.chart.append('x', [[1000, 1], [1001, 2]]);
+  m.chart.redraw(1001);
+  assertEqual(m.chart.unavailable(), false, '初始应为可用：');
+
+  m.chart.setUnavailable('读取 RAPL 需要权限');
+  assertEqual(m.chart.unavailable(), true, '调用后应处于不可用：');
+  assertEqual(m.svg.style.display, 'none', '提示期间应隐藏 svg：');
+  assertEqual(m.host.children.length, 2, '应多出一个提示元素：');
+
+  var recovered = m.chart.setAvailable();
+  assertEqual(recovered, true, '应当报告已恢复：');
+  assertEqual(m.chart.unavailable(), false, '恢复后状态应为可用：');
+  assertEqual(m.svg.style.display, '', '恢复后应放回 svg：');
+  assertEqual(m.host.children.length, 1, '提示元素应被移除：');
+
+  /* 再次调用不该误报，也不该把 svg 弄坏 */
+  assertEqual(m.chart.setAvailable(), false, '重复恢复应返回 false：');
+  m.chart.append('x', [[1002, 3]]);
+  var peak = m.chart.redraw(1002);
+  assert(peak === 3, '恢复后仍能正常绘图，峰值：' + peak);
 });
 
 test('填充面积与线条路径一致（单条序列两条 path）', function () {
