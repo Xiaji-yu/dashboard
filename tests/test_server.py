@@ -602,5 +602,146 @@ class OverviewBeforeFirstSampleTest(unittest.TestCase):
         return type("Stub", (), {"collector": None})()
 
 
+class ApiTokenFlowTest(unittest.TestCase):
+    """只读令牌的 HTTP 行为：两种携带方式、只读限制、管理接口仅会话可用、日志脱敏。"""
+
+    PASSWORD = "token-pass-1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.auth = AuthStore(os.path.join(self.tmp.name, "auth.json"), username="tester",
+                              password=self.PASSWORD, logger=lambda message: None)
+        # 自己预热一份快照：否则单独跑这个类时 ready 为 false（依赖别的测试类预热过 state）
+        self.collector = Collector()
+        self.collector.sample()
+        snapshot = self.collector.sample()
+        with server.state_lock:
+            server.state["snapshot"] = snapshot
+            server.state["series_ts"] = snapshot["ts"]
+        self.httpd = server.create_server(self.collector, "127.0.0.1", 0, auth=self.auth)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._stop)
+        self.session = self._login()
+
+    def _stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+
+    def _raw(self, method, path, payload=None, cookie=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            merged = dict(headers or {})
+            if cookie:
+                merged["Cookie"] = cookie
+            body = None
+            if payload is not None:
+                body = json.dumps(payload).encode("utf-8")
+                merged["Content-Type"] = "application/json"
+            conn.request(method, path, body=body, headers=merged)
+            response = conn.getresponse()
+            data = response.read()
+            return (response.status,
+                    {key.lower(): value for key, value in response.getheaders()}, data)
+        finally:
+            conn.close()
+
+    def _login(self):
+        _status, headers, _body = self._raw("POST", "/api/login",
+                                            {"username": "tester", "password": self.PASSWORD})
+        return (headers.get("set-cookie") or "").split(";")[0]
+
+    def _new_token(self, name="bot"):
+        status, _headers, body = self._raw("POST", "/api/tokens", {"name": name},
+                                           cookie=self.session)
+        self.assertEqual(status, 200)
+        return json.loads(body)["token"], json.loads(body)["record"]
+
+    def test_bearer_and_query_token(self):
+        token, record = self._new_token()
+        for headers, path in (({"Authorization": f"Bearer {token}"}, "/api/overview"),
+                              ({}, f"/api/overview?token={token}")):
+            status, response_headers, body = self._raw("GET", path, headers=headers)
+            self.assertEqual(status, 200, path)
+            self.assertIn("application/json", response_headers.get("content-type", ""))
+            self.assertTrue(json.loads(body)["ready"])
+        # /api/auth 要如实报告这是令牌身份
+        status, _headers, body = self._raw("GET", "/api/auth",
+                                           headers={"Authorization": f"Bearer {token}"})
+        payload = json.loads(body)
+        self.assertEqual(payload["kind"], "token")
+        self.assertEqual(payload["token_name"], record["name"])
+        self.assertIsNone(payload["username"])
+
+    def test_bad_token_does_not_fall_back_to_cookie(self):
+        """带了无效令牌就算同时有有效 Cookie 也必须 401，避免身份歧义。"""
+        status, _headers, _body = self._raw(
+            "GET", "/api/overview", cookie=self.session,
+            headers={"Authorization": "Bearer dshk_not-a-real-token-1234567890"})
+        self.assertEqual(status, 401)
+        status, _headers, _body = self._raw("GET", "/api/overview?token=dshk_bogus-1234567890")
+        self.assertEqual(status, 401)
+
+    def test_token_is_read_only(self):
+        token, _record = self._new_token()
+        auth = {"Authorization": f"Bearer {token}"}
+        for path, payload in (("/api/password", {"old_password": self.PASSWORD,
+                                                 "new_password": "another-pass-1"}),
+                              ("/api/logout", {}),
+                              ("/api/tokens", {"name": "sneaky"}),
+                              ("/api/tokens/revoke", {"id": "dshk_any"})):
+            status, _headers, body = self._raw("POST", path, payload, headers=auth)
+            self.assertEqual(status, 403, path)
+            self.assertEqual(json.loads(body)["error"], "read_only")
+        # 只读令牌也不能列令牌
+        status, _headers, _body = self._raw("GET", "/api/tokens", headers=auth)
+        self.assertEqual(status, 403)
+
+    def test_session_can_manage_tokens(self):
+        token, record = self._new_token("my-bot")
+        status, _headers, body = self._raw("GET", "/api/tokens", cookie=self.session)
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual([row["id"] for row in payload["list"]], [record["id"]])
+        self.assertEqual(payload["list"][0]["name"], "my-bot")
+        self.assertNotIn("sha256", json.dumps(payload), "列表不能泄露哈希")
+        self.assertEqual(payload["max"], server.MAX_TOKENS)
+
+        # 撤销后立刻失效
+        status, _headers, body = self._raw("POST", "/api/tokens/revoke",
+                                           {"id": record["id"]}, cookie=self.session)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertEqual(self._raw("GET", "/api/overview",
+                                   headers={"Authorization": f"Bearer {token}"})[0], 401)
+        status, _headers, body = self._raw("GET", "/api/tokens", cookie=self.session)
+        self.assertEqual(json.loads(body)["list"], [], "撤销后列表应为空")
+
+    def test_revoke_unknown_id(self):
+        status, _headers, body = self._raw("POST", "/api/tokens/revoke",
+                                           {"id": "dshk_nope"}, cookie=self.session)
+        self.assertEqual(status, 404)
+        self.assertFalse(json.loads(body)["ok"])
+
+    def test_token_management_needs_auth(self):
+        status, _headers, _body = self._raw("GET", "/api/tokens")
+        self.assertEqual(status, 401)
+        status, _headers, _body = self._raw("POST", "/api/tokens", {"name": "x"})
+        self.assertEqual(status, 401)
+
+    def test_query_token_is_redacted_in_logs(self):
+        token, _record = self._new_token()
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self._raw("GET", f"/api/definitely-not-here?token={token}")
+            time.sleep(0.2)
+        log = captured.getvalue()
+        self.assertNotIn(token, log, "日志里不能出现令牌")
+        self.assertIn("token=<redacted>", log)
+
+
 if __name__ == "__main__":
     unittest.main()

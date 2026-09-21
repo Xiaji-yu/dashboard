@@ -8,9 +8,10 @@ import time
 import unittest
 from unittest import mock
 
-from auth import (LOGIN_MAX_FAILURES, MAX_TRACKED_IPS, PASSWORD_MIN_LENGTH,
-                  SESSION_SAVE_INTERVAL, SESSION_TTL, AuthConfigError, AuthStore,
-                  generate_password, hash_password, password_record_ok, verify_password)
+from auth import (LOGIN_MAX_FAILURES, MAX_TOKENS, MAX_TRACKED_IPS, PASSWORD_MIN_LENGTH,
+                  SESSION_SAVE_INTERVAL, SESSION_TTL, TOKEN_PREFIX, AuthConfigError,
+                  AuthStore, generate_password, generate_token, hash_password,
+                  hash_token, password_record_ok, verify_password)
 
 PASSWORD = "initial-pass-1"
 
@@ -302,3 +303,89 @@ class AuthConfigErrorUsageTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             server.main()
         self.assertIn("凭据不可用", str(ctx.exception))
+
+class ApiTokenTest(unittest.TestCase):
+    """只读 API 令牌：生成、校验、撤销、只存哈希、上限与环境变量播种。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "auth.json")
+        self.store = AuthStore(self.path, username="admin", password=PASSWORD,
+                               logger=lambda message: None)
+
+    def test_generate_token_shape(self):
+        token = generate_token()
+        self.assertTrue(token.startswith(TOKEN_PREFIX))
+        self.assertGreaterEqual(len(token), 40)
+        self.assertNotEqual(token, generate_token())
+        self.assertEqual(hash_token(token), hash_token(token))
+
+    def test_create_and_verify(self):
+        record, token = self.store.create_token("my-bot")
+        self.assertEqual(record["name"], "my-bot")
+        self.assertEqual(record["id"], token[:8])
+        self.assertIsNone(record["last_used"])
+        info = self.store.verify_token(token)
+        self.assertEqual(info, {"id": record["id"], "name": "my-bot"})
+        self.assertIsNotNone(self.store.tokens()[0]["last_used"], "校验后应记录最近使用")
+
+    def test_verify_rejects_junk(self):
+        for bad in (None, "", "short", "dshk_wrong-token-value-1234567890", 12345,
+                    ["dshk_x"], {"token": "x"}):
+            self.assertIsNone(self.store.verify_token(bad), bad)
+
+    def test_file_stores_only_hash(self):
+        _record, token = self.store.create_token("bot")
+        with open(self.path, encoding="utf-8") as handle:
+            raw = handle.read()
+        self.assertNotIn(token, raw, "凭据文件里不能出现明文令牌")
+        self.assertIn("sha256", raw)
+        self.assertNotIn("dshk_", raw.replace(token[:8], ""), "除了 8 位可识别前缀，不该出现令牌本体")
+
+    def test_list_hides_secrets(self):
+        self.store.create_token("bot")
+        row = self.store.tokens()[0]
+        self.assertEqual(sorted(row), ["created", "id", "last_used", "name"])
+
+    def test_revoke(self):
+        record, token = self.store.create_token("bot")
+        self.assertTrue(self.store.revoke_token(record["id"]))
+        self.assertIsNone(self.store.verify_token(token), "撤销后应立即失效")
+        self.assertFalse(self.store.revoke_token("dshk_nope"), "不存在的 id 返回 False")
+        self.assertEqual(self.store.tokens(), [])
+
+    def test_token_count_is_capped(self):
+        for index in range(MAX_TOKENS + 5):
+            self.store.create_token(f"bot-{index}")
+        self.assertEqual(len(self.store.tokens()), MAX_TOKENS)
+
+    def test_last_used_save_is_throttled(self):
+        _record, token = self.store.create_token("bot")
+        with mock.patch.object(AuthStore, "_save", autospec=True) as save:
+            self.store.verify_token(token)
+            save.assert_not_called()
+            self.store._last_save = time.time() - 3600
+            self.store.verify_token(token)
+            save.assert_called_once()
+
+    def test_seed_from_env_only_when_no_tokens(self):
+        with mock.patch.dict(os.environ, {"DASHBOARD_API_TOKEN": "dshk_from-env-1234567890"}):
+            seeded = self.store.seed_env_token()
+            self.assertIsNotNone(seeded)
+            self.assertTrue(self.store.env_seeded())
+            self.assertIsNotNone(self.store.verify_token("dshk_from-env-1234567890"))
+            # 已有令牌时不再插手（撤销后重启也不会把它加回来）
+            self.assertIsNone(self.store.seed_env_token())
+
+    def test_seed_from_env_absent(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(self.store.seed_env_token())
+            self.assertFalse(self.store.env_seeded())
+
+    def test_seed_from_env_persists_across_restart(self):
+        with mock.patch.dict(os.environ, {"DASHBOARD_API_TOKEN": "dshk_persist-1234567890"}):
+            self.store.seed_env_token()
+            again = AuthStore(self.path, logger=lambda message: None)
+        self.assertIsNotNone(again.verify_token("dshk_persist-1234567890"))
+        self.assertEqual(len(again.tokens()), 1)

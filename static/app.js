@@ -285,13 +285,85 @@ pollBadges();
     setMessage('');
     modal.hidden = false;
     loadAccount();
+    loadTokens();
     document.getElementById('account-old').focus();
   }
 
   function closeAccount() {
     modal.hidden = true;
     setMessage('');
+    /* 新令牌只显示一次：关掉弹窗就把它从 DOM 里抹掉 */
+    document.getElementById('token-secret').hidden = true;
+    document.getElementById('token-value').textContent = '';
+    setTokenMessage('');
   }
+
+  /* ---------------- 只读 API Token ---------------- */
+
+  function fmtTokenTime(ts) {
+    if (!ts) return '未使用';
+    var date = new Date(ts * 1000);
+    var pad = function (value) { return value < 10 ? '0' + value : String(value); };
+    return pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' +
+      pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+  function setTokenMessage(text, ok) {
+    var box = document.getElementById('token-message');
+    box.textContent = text || '';
+    box.classList.toggle('show', Boolean(text));
+    box.style.color = ok ? 'var(--green)' : '';
+  }
+
+  function loadTokens() {
+    fetchJSON('/api/tokens').then(function (data) {
+      var list = data.list || [];
+      document.getElementById('token-note').textContent = list.length + ' / ' + data.max +
+        (data.env_seeded ? ' · 含环境变量播种' : '');
+      var host = document.getElementById('token-list');
+      if (!list.length) {
+        host.innerHTML = '<div class="empty">还没有令牌</div>';
+        return;
+      }
+      host.innerHTML = list.map(function (item) {
+        return '<div class="token-row">' +
+          '<span class="token-id">' + esc(item.id) + '…</span>' +
+          '<span class="token-name">' + esc(item.name) + '</span>' +
+          '<span class="token-time">' + esc(fmtTokenTime(item.last_used)) + '</span>' +
+          '<button class="token-revoke" data-id="' + esc(item.id) + '" type="button">撤销</button>' +
+          '</div>';
+      }).join('');
+      Array.prototype.forEach.call(document.querySelectorAll('.token-revoke'), function (button) {
+        button.addEventListener('click', function () { revokeToken(button.getAttribute('data-id')); });
+      });
+    }).catch(function () {
+      document.getElementById('token-note').textContent = '读取失败';
+    });
+  }
+
+  function revokeToken(id) {
+    postJSON('/api/tokens/revoke', { id: id }).then(function (result) {
+      setTokenMessage(result.data.message || (result.data.ok ? '已撤销' : '撤销失败'),
+                      Boolean(result.data.ok));
+      loadTokens();
+    }).catch(function () { setTokenMessage('撤销失败，请重试'); });
+  }
+
+  document.getElementById('token-create').addEventListener('click', function () {
+    var name = document.getElementById('token-name').value.trim() || 'bot';
+    setTokenMessage('创建中…', true);
+    postJSON('/api/tokens', { name: name }).then(function (result) {
+      if (!result.data.ok) {
+        setTokenMessage(result.data.message || '创建失败');
+        return;
+      }
+      document.getElementById('token-value').textContent = result.data.token;
+      document.getElementById('token-secret').hidden = false;
+      document.getElementById('token-name').value = '';
+      setTokenMessage('已创建，请复制上面的令牌（只显示这一次）', true);
+      loadTokens();
+    }).catch(function () { setTokenMessage('创建失败，请重试'); });
+  });
 
   document.getElementById('account').addEventListener('click', openAccount);
   document.getElementById('account-close').addEventListener('click', closeAccount);

@@ -25,13 +25,18 @@ find_pid() {
       return 0
     fi
   fi
-  local pid args
-  while read -r pid args; do
-    if [[ "$args" == "python3 $DIR/server.py" ]]; then
+  # 判定条件：进程名是 python3、命令行**恰好两个参数**（解释器 + 本脚本路径）。
+  # 这样既认 run.sh 起的 "python3 <路径>"，也认 systemd 单元的 "/usr/bin/python3 <路径>"，
+  # 又不会把「命令行里恰好含这段文字」的 shell/编辑器当成服务。
+  local pid comm args argv0 argv1 extra
+  while read -r pid comm args; do
+    [[ "$comm" == "python3" ]] || continue
+    read -r argv0 argv1 extra <<< "$args"
+    if [[ "$argv0" == *python3 && "$argv1" == "$DIR/server.py" && -z "$extra" ]]; then
       printf '%s' "$pid"
       return 0
     fi
-  done < <(ps -eo pid=,args= 2>/dev/null)
+  done < <(ps -eo pid=,comm=,args= 2>/dev/null)
   return 1
 }
 
@@ -59,7 +64,17 @@ case "${1:-start}" in
       chmod 600 "$PID_FILE" 2>/dev/null || true
       echo "已启动：http://127.0.0.1:$PORT/  （PID $pid，日志 $LOG_FILE）"
     else
-      echo "启动失败，日志末尾："
+      if grep -q "Address already in use" "$LOG_FILE" 2>/dev/null; then
+        echo "启动失败：端口 $PORT 已被占用。"
+        if systemctl is-active --quiet dashboard 2>/dev/null; then
+          echo "  看起来是 systemd 在托管（dashboard.service）——请不要再用 run.sh 启停："
+          echo "    sudo systemctl restart dashboard"
+        else
+          echo "  用 ss -tlnp | grep $PORT 看是谁占用。"
+        fi
+      else
+        echo "启动失败，日志末尾："
+      fi
       tail -n 20 "$LOG_FILE" || true
       exit 1
     fi

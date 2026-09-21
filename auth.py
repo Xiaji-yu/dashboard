@@ -31,6 +31,10 @@ LOGIN_MAX_FAILURES = 5           # 窗口内允许的失败次数
 PASSWORD_MIN_LENGTH = 8
 MAX_TRACKED_IPS = 1000           # 限速表最多记这么多来源，防止被刷爆内存
 SESSION_SAVE_INTERVAL = 300.0    # 会话 last_seen 至少间隔这么久才落盘一次
+TOKEN_SAVE_INTERVAL = 300.0      # 令牌 last_used 的落盘节流
+TOKEN_PREFIX = "dshk_"           # 便于在日志/配置里一眼认出这是看板令牌
+TOKEN_BYTES = 32                 # 256 位随机量
+MAX_TOKENS = 20                  # 最多保留的只读令牌数
 
 
 class AuthConfigError(RuntimeError):
@@ -84,6 +88,20 @@ def verify_password(password, record):
     return hmac.compare_digest(digest, expected)
 
 
+def generate_token():
+    """生成只读 API 令牌：dshk_ + 43 个 URL-safe 字符（256 位随机量）。"""
+    return TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES)
+
+
+def hash_token(token):
+    """令牌只做一次 SHA-256。
+
+    口令要用 PBKDF2 慢哈希是为了抵抗字典/暴力猜测；令牌是 256 位随机量，
+    没有可猜的分布，慢哈希只会让每次请求多花上百毫秒，所以这里用 SHA-256。
+    """
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
 def generate_password(length=20):
     """随机初始密码。去掉容易看错的字符，方便手抄。"""
     alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -98,7 +116,8 @@ class AuthStore:
         self.logger = logger or (lambda message: None)
         self._lock = threading.Lock()
         self._failures = {}          # ip -> [失败时间戳]
-        self._last_save = 0.0        # 上次落盘时间（session 刷新节流用）
+        self._last_save = 0.0        # 上次落盘时间（session / token 刷新节流用）
+        self._token_env_seeded = False
         self.data = {}
         self._load_or_create(username, password)
 
@@ -155,6 +174,97 @@ class AuthStore:
         self._save()
         self.logger(f"[auth] 首次启动，已生成初始账号：{user} / {secret}")
         self.logger(f"[auth] 凭据文件：{self.path}（权限 600，已加入 .gitignore；登录后请自行修改密码）")
+
+    def seed_env_token(self):
+        """把 DASHBOARD_API_TOKEN 播种成只读令牌（**仅在当前一个令牌都没有时**）。
+
+        方便 systemd / 容器用环境变量下发令牌；一旦你在页面上建过或撤销过令牌，
+        这里就不再插手（撤销后重启不会把它加回来）。
+        """
+        token = (os.environ.get("DASHBOARD_API_TOKEN") or "").strip()
+        if not token:
+            return None
+        with self._lock:
+            if self.data.get("tokens"):
+                return None
+            record = self._add_token("环境变量 DASHBOARD_API_TOKEN", token)
+            self.logger(f"[auth] 已从 DASHBOARD_API_TOKEN 播种只读令牌：{record['id']}…")
+            self._token_env_seeded = True
+            return record
+
+    # ---------------- 只读 API 令牌 ----------------
+
+    def env_seeded(self):
+        """本次启动是否用 DASHBOARD_API_TOKEN 播种过令牌。"""
+        return bool(self._token_env_seeded)
+
+    def tokens(self):
+        """列出令牌（不含任何可用于验证的字段）。"""
+        with self._lock:
+            rows = []
+            for record in self.data.get("tokens") or []:
+                rows.append({"id": record.get("id"), "name": record.get("name"),
+                             "created": record.get("created"),
+                             "last_used": record.get("last_used")})
+            rows.sort(key=lambda item: item.get("created") or 0)
+            return rows
+
+    def _add_token(self, name, token):
+        record = {
+            "id": token[:8],
+            "name": (name or "").strip()[:40] or "未命名",
+            "sha256": hash_token(token),
+            "created": time.time(),
+            "last_used": None,
+        }
+        tokens = list(self.data.get("tokens") or [])
+        tokens.append(record)
+        # 超出上限时淘汰最久没用过的
+        if len(tokens) > MAX_TOKENS:
+            tokens.sort(key=lambda item: item.get("last_used") or item.get("created") or 0)
+            tokens = tokens[-MAX_TOKENS:]
+        self.data["tokens"] = tokens
+        self.data["updated_at"] = time.time()
+        self._save()
+        return {"id": record["id"], "name": record["name"],
+                "created": record["created"], "last_used": record["last_used"]}
+
+    def create_token(self, name, token=None):
+        """新建只读令牌，返回 (记录, 完整令牌)。完整令牌只在此刻返回一次。"""
+        with self._lock:
+            token = token or generate_token()
+            record = self._add_token(name, token)
+            return record, token
+
+    def revoke_token(self, token_id):
+        with self._lock:
+            tokens = list(self.data.get("tokens") or [])
+            keep = [item for item in tokens if item.get("id") != token_id]
+            if len(keep) == len(tokens):
+                return False
+            self.data["tokens"] = keep
+            self.data["updated_at"] = time.time()
+            self._save()
+            return True
+
+    def verify_token(self, token):
+        """校验只读令牌；成功返回 {id, name}，失败返回 None。
+
+        用 hmac.compare_digest 做定长比较；令牌表很小（默认上限 20），线性查找足够。
+        """
+        if not isinstance(token, str) or len(token) < 12:
+            return None
+        digest = hash_token(token)
+        with self._lock:
+            now = time.time()
+            for record in self.data.get("tokens") or []:
+                if not hmac.compare_digest(record.get("sha256") or "", digest):
+                    continue
+                record["last_used"] = now
+                if now - self._last_save >= TOKEN_SAVE_INTERVAL:
+                    self._save()
+                return {"id": record.get("id"), "name": record.get("name")}
+        return None
 
     def _quarantine(self):
         """把损坏的凭据另存一份（保留原文件，绝不覆盖），返回备份路径。"""

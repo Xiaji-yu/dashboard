@@ -57,6 +57,24 @@
         <button class="side-btn" id="account-logout-all" type="button">退出全部设备</button>
       </div>
       <p class="login-tip">改密码后，其他设备上的登录会立即失效（当前这台保持登录）。</p>
+
+      <div class="token-box">
+        <div class="kv-row"><span>只读 API Token</span><b id="token-note">—</b></div>
+        <div class="token-list" id="token-list"></div>
+        <label class="login-field"><span>新令牌名称（如 bot）</span>
+          <input id="token-name" type="text" autocapitalize="off" spellcheck="false"
+                 placeholder="给谁用"></label>
+        <div class="modal-actions">
+          <button class="side-btn" id="token-create" type="button">新建只读令牌</button>
+        </div>
+        <div class="token-secret" id="token-secret" hidden>
+          <div class="token-secret-head">只显示这一次，请立刻复制</div>
+          <code id="token-value"></code>
+        </div>
+        <div class="login-error" id="token-message" role="alert"></div>
+        <p class="login-tip">只读令牌只能访问 GET 接口，不能改密码、退出或管理令牌；撤销后立即失效。
+          用法：<code>curl -H "Authorization: Bearer &lt;token&gt;" …</code></p>
+      </div>
     </div>
   </div>
 </div>

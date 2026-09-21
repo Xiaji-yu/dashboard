@@ -222,6 +222,32 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `GET /api/auth` | 当前登录状态（**无需登录**）：`{authenticated, username, host}` |
 | `POST /api/password` | 改密码/用户名：`{old_password, new_password?, new_username?}` |
 
+### 只读 API Token（推荐给 Bot / 脚本）
+
+不想让 bot 保存账号密码、也不想维护 Cookie 会话，就发一个**只读令牌**：
+
+- 生成：页面侧栏「账号」→「新建只读令牌」（**完整令牌只显示这一次**）；
+  或在启动时用环境变量 `DASHBOARD_API_TOKEN` 播种（**仅在还没有任何令牌时生效**）。
+- 携带方式二选一：
+
+  ```bash
+  curl -H "Authorization: Bearer dshk_xxx" http://127.0.0.1:8282/api/overview
+  curl "http://127.0.0.1:8282/api/series?keys=cpu&token=dshk_xxx"
+  ```
+
+- **只能读**：令牌访问任何写接口（改密码 / 退出 / 管理令牌）都返回 `403 {"error":"read_only"}`；
+  也不能用令牌创建或撤销令牌——管理令牌必须用页面会话。
+- 存储：服务端只保存令牌的 SHA-256（256 位随机量，没有可猜分布，所以不需要慢哈希），
+  明文只在创建时返回一次。
+- 撤销即时生效；`/api/auth` 会如实回报当前身份（`kind: "session"` 或 `"token"` + `token_name`）。
+- 令牌出现在 URL 里会被日志脱敏成 `token=<redacted>`，但仍建议优先用 `Authorization` 头。
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/tokens` | 列出只读令牌（仅页面会话可用） |
+| `POST /api/tokens` | 新建令牌：`{name}` → `{token, record}`，`token` 只返回这一次 |
+| `POST /api/tokens/revoke` | 撤销令牌：`{id}` |
+
 ## 接口总览
 
 | 接口 | 用途 | 建议轮询 |
@@ -276,6 +302,30 @@ SERIES = """
 
 BOT = [x for x in ["""
 ## Bot 取数配方
+
+**推荐先建一个只读令牌**，这样 bot 不用存账号密码、也不会因为改密码而被踢：
+
+```python
+import json
+import urllib.request
+
+BASE = "http://192.168.1.111:8282"
+TOKEN = "dshk_你的只读令牌"
+
+
+def get(path):
+    request = urllib.request.Request(BASE + path,
+                                     headers={"Authorization": "Bearer " + TOKEN})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+ov = get("/api/overview")
+print(f"CPU {ov['cpu']['percent']:.0f}%｜温度 {ov['temp']['celsius']:.0f}°C"
+      f"｜功耗 {ov['power']['watts']:.1f} W")
+```
+
+（下面这段是**用账号密码 + Cookie 会话**的写法，适合需要写操作或不想额外发令牌的场景。）
 
 **只取几个标量时，用 `/api/overview` 一次拿完**（CPU/内存/功耗/网速/磁盘/温度/负载/最忙进程/服务摘要都在里面），
 不要为省流量去拼多个接口。

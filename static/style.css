@@ -1510,3 +1510,59 @@ body {
 
 .modal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
 .modal-actions .side-btn { margin-top: 0; }
+
+/* 账号弹窗里的只读令牌区 */
+.token-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line-soft);
+}
+
+.token-list { display: flex; flex-direction: column; gap: 4px; max-height: 132px; overflow: auto; }
+
+.token-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) 78px 46px;
+  gap: 8px;
+  align-items: center;
+  font-size: 11.5px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--line-soft);
+}
+
+.token-id { color: var(--dim); font-variant-numeric: tabular-nums; }
+.token-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.token-time { color: var(--muted); font-size: 11px; text-align: right; }
+
+.token-revoke {
+  font-size: 11px;
+  color: var(--pink);
+  background: rgba(255, 107, 157, 0.12);
+  border: none;
+  border-radius: 5px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.token-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: rgba(61, 220, 151, 0.08);
+  border: 1px solid rgba(61, 220, 151, 0.28);
+  border-radius: 8px;
+}
+
+.token-secret[hidden] { display: none; }
+.token-secret-head { font-size: 11px; color: var(--green); }
+
+.token-secret code {
+  font-size: 11.5px;
+  color: var(--text);
+  word-break: break-all;
+  user-select: all;
+}

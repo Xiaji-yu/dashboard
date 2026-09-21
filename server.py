@@ -8,6 +8,11 @@
   POST /api/login            登录（JSON：username / password）
   POST /api/logout           退出登录
   POST /api/password         修改密码 / 用户名（需登录）
+  GET  /api/tokens           列出只读 API 令牌（仅页面会话）
+  POST /api/tokens           新建只读令牌，完整令牌只返回一次（仅页面会话）
+  POST /api/tokens/revoke    撤销只读令牌（仅页面会话）
+
+只读令牌：`Authorization: Bearer <token>` 或 `?token=<token>`，只能访问 GET 接口。
   GET /static/*              前端资源
   GET /api/overview          瞬时快照：指标 + 最忙进程 + 服务状态
   GET /api/performance       性能与电源：每核占用、温度、风扇、GPU、电池、内存构成
@@ -40,7 +45,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from auth import SESSION_TTL, AuthConfigError, AuthStore, auth_file_path
+from auth import (MAX_TOKENS, SESSION_TTL, AuthConfigError, AuthStore, auth_file_path)
 from collector import Collector
 from history import History, WINDOW_SECONDS
 
@@ -56,6 +61,19 @@ def trust_proxy():
     """
     return os.environ.get("DASHBOARD_TRUST_PROXY", "").strip().lower() in (
         "1", "true", "yes", "on")
+
+
+def bearer_token(headers):
+    """从 `Authorization: Bearer <token>` 取只读令牌。"""
+    raw = headers.get("Authorization") or ""
+    if raw.lower().startswith("bearer "):
+        return raw[7:].strip() or None
+    return None
+
+
+def redact_token(text):
+    """把 URL 里的 token 参数抹掉，避免令牌被写进日志。"""
+    return re.sub(r"(token=)[^&\s\"]+", r"\1<redacted>", text or "")
 
 
 def client_ip(headers, peer, trust=False):
@@ -216,6 +234,28 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return self.auth.session(self._token())
 
+    def _auth_context(self, parsed=None):
+        """返回 ("token", 记录) / ("session", 会话) / (None, None)。
+
+        只读令牌可用 `Authorization: Bearer` 或 `?token=` 携带；令牌无效时**不回退**成会话，
+        避免「带着坏令牌却用 Cookie 通过了」这种歧义。
+        """
+        if self.auth is None:
+            return None, None
+        token = bearer_token(self.headers)
+        if not token and parsed is not None:
+            token = (parse_qs(parsed.query).get("token", [""])[0] or "").strip() or None
+        if token:
+            record = self.auth.verify_token(token)
+            return ("token", record) if record else (None, None)
+        session = self.auth.session(self._token())
+        return ("session", session) if session else (None, None)
+
+    @staticmethod
+    def _read_only_error():
+        return {"error": "read_only",
+                "message": "该只读令牌不能执行写操作（改密码/退出/管理令牌请用页面登录）"}
+
     @staticmethod
     def _session_cookie(token):
         return (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; "
@@ -291,7 +331,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = unquote(urlparse(self.path).path)
         raw = self._read_body()          # 无论结果如何都要读掉，避免密码被当成请求行回显到日志
-        if path not in ("/api/login", "/api/logout", "/api/password"):
+        if path not in ("/api/login", "/api/logout", "/api/password",
+                        "/api/tokens", "/api/tokens/revoke"):
             return self.send_error(404)
         if not self._post_allowed():
             return self._send_json(
@@ -303,6 +344,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/login":
             return self._login(payload)
+
+        kind, _info = self._auth_context(urlparse(self.path))
+        if kind == "token":
+            # 只读令牌不能做任何写操作（含管理令牌、退出、改密码）
+            return self._send_json(self._read_only_error(), status=403)
+
+        if path == "/api/tokens":
+            if kind != "session":
+                return self._send_json({"error": "unauthorized"}, status=401)
+            record, token = self.auth.create_token(payload.get("name"))
+            return self._send_json({"ok": True, "token": token, "record": record})
+
+        if path == "/api/tokens/revoke":
+            if kind != "session":
+                return self._send_json({"error": "unauthorized"}, status=401)
+            ok = self.auth.revoke_token((payload.get("id") or "").strip())
+            return self._send_json(
+                {"ok": ok, "message": "已撤销" if ok else "没有这个令牌"},
+                status=200 if ok else 404)
+
         if path == "/api/logout":
             token = self._token()
             if self.auth:
@@ -360,19 +421,31 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/static/style.css", "/static/login.js"):
             return self._send_file(os.path.join(STATIC_DIR, os.path.basename(path)))
         if path == "/api/auth":
-            session = self._session()
-            return self._send_json({"authenticated": bool(session),
-                                    "username": (session or {}).get("username"),
-                                    "host": socket.gethostname()})
+            kind, info = self._auth_context(parsed)
+            return self._send_json({
+                "authenticated": bool(kind),
+                "kind": kind,
+                "username": (info or {}).get("username") if kind == "session" else None,
+                "token_name": (info or {}).get("name") if kind == "token" else None,
+                "host": socket.gethostname()})
         if path == "/login":
             if self._session():
                 return self._redirect("/")
             return self._send_file(os.path.join(STATIC_DIR, "login.html"))
-        if not self._session():
+        kind, info = self._auth_context(parsed)
+        if kind is None:
             # 未登录：接口给 401，页面与前端资源跳登录页
             if path.startswith("/api/"):
                 return self._send_json({"error": "unauthorized"}, status=401)
             return self._redirect("/login")
+
+        if path == "/api/tokens":
+            # 管理只读令牌只允许页面会话：被泄露的只读令牌不能借此提权
+            if kind != "session":
+                return self._send_json(self._read_only_error(), status=403)
+            return self._send_json({
+                "list": self.auth.tokens(), "max": MAX_TOKENS,
+                "env_seeded": self.auth.env_seeded()})
 
         if path == "/api/overview":
             return self._send_json(self._overview())
@@ -535,7 +608,8 @@ class Handler(BaseHTTPRequestHandler):
             # 浏览器自动请求 favicon，没放图标时全是 404，没有诊断价值
             if "favicon.ico" in self.path:
                 return
-            print(f"[http] {self.address_string()} {fmt % args}", flush=True)
+            line = redact_token(fmt % args)
+            print(f"[http] {self.address_string()} {line}", flush=True)
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -584,6 +658,7 @@ def main():
     except AuthConfigError as exc:
         # 凭据读不到或损坏时宁可不启动，也不能静默重建覆盖原账号
         raise SystemExit(f"凭据不可用，服务未启动：\n{exc}")
+    auth_store.seed_env_token()
     collector = Collector()
     threading.Thread(target=sampler, args=(collector,), daemon=True).start()
     # 延迟探测单独一个线程：连接超时不该拖慢 1 秒采样
