@@ -1,0 +1,46 @@
+# 可选方案：容器部署（想统一用 compose 管理时才用）
+#
+# 代价（详见同目录 README.md）：要让看板看到宿主机，必须开 pid/network host、
+# 挂 /proc 与 /sys，并且挂上 docker.sock —— 这等价于把 root 能力交给容器；
+# 而容器里没有 systemd，服务页的「系统服务」会读不到。
+#
+# 用法：
+#   cd deploy && docker compose up -d --build
+#   docker compose logs -f | grep auth     # 首次启动的初始账号密码
+
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: dashboard:local
+    container_name: dashboard
+    restart: unless-stopped
+
+    # 与宿主机共享进程与网络命名空间，否则指标是空的
+    pid: host
+    network_mode: host
+
+    environment:
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: 8282
+      DASHBOARD_INTERVAL: 1.0
+      # 凭据放数据卷，容器重建也不丢
+      DASHBOARD_AUTH_FILE: /data/auth.json
+      # 想指定初始账密就打开（只在凭据文件不存在时生效）
+      # DASHBOARD_USER: admin
+      # DASHBOARD_PASSWORD: 换成你自己的强密码
+
+    volumes:
+      - /proc:/proc:ro                       # 进程、网络接口、ARP 邻居表
+      - /sys:/sys:ro                         # 温度、风扇、RAPL、磁盘
+      - /etc/os-release:/etc/os-release:ro   # 设备页要显示宿主机的系统，而不是镜像的
+      - /var/run/docker.sock:/var/run/docker.sock   # 容器列表（≈ root 等价，务必清楚）
+      - dashboard-data:/data
+
+    # 局域网扫描要发 ICMP
+    cap_add:
+      - NET_RAW
+
+volumes:
+  dashboard-data:

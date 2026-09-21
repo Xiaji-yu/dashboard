@@ -1,0 +1,13 @@
+# 容器构建上下文（deploy/docker-compose.yml 用的是仓库根目录）
+.git
+.shots
+docs
+tests
+__pycache__
+*.pyc
+# 凭据与运行时产物绝不进镜像
+auth.json
+server.log
+server.pid
+.gitignore
+.github

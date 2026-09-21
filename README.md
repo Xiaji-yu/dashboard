@@ -76,73 +76,44 @@ $ ./run.sh log | grep auth
 
 `run.sh` 用 `setsid` 启动服务，脱离当前会话/进程组——关掉终端或父进程被杀都不会带走它。
 
-## 部署到 systemd（顺便解决功耗采集）
+## 部署
 
-仓库里带了一个可直接用的服务单元：`deploy/dashboard.service`。
+**推荐用 systemd 常驻**（这个看板的价值就是能看到宿主机：`/proc` 的进程、`/sys` 的温度风扇功耗、
+docker 与 systemd 的状态；容器化要把这些宿主能力全开后，隔离所剩不多）。完整步骤见
+[`deploy/README.md`](deploy/README.md)，最小路径：
 
 ```bash
-sudo cp deploy/dashboard.service /etc/systemd/system/dashboard.service
-sudo editor /etc/systemd/system/dashboard.service   # 改 User= 和路径
-sudo systemctl daemon-reload
-sudo systemctl enable --now dashboard
-systemctl status dashboard
+cd /home/xiaji/code/dashboard
+./run.sh stop                                  # 先停掉 run.sh 起的实例，避免抢端口
+sudo cp deploy/dashboard.service /etc/systemd/system/
+sudo nano /etc/systemd/system/dashboard.service   # 改 User= 与 WorkingDirectory=
+sudo systemctl daemon-reload && sudo systemctl enable --now dashboard
+journalctl -u dashboard | grep auth            # 首次启动的随机账号密码
 ```
 
-**关于功耗采集**：`/sys/class/powercap/intel-rapl*/energy_uj` 默认是 `0400 root root`，
-所以以普通用户运行的服务读不到，页面上会显示「不可用」。有两种开权限的方式：
+三个容易踩的点：
 
-1. **服务单元里的 `ExecStartPre`（默认已写好，推荐）**：systemd 以 root 身份在启动时执行一次
-   `chmod 0444 /sys/class/powercap/intel-rapl*/energy_uj`，服务进程本身仍是普通用户。
-2. **udev 规则（备选）**：`deploy/60-dashboard-rapl.rules`。
+1. **`AmbientCapabilities=CAP_NET_RAW` 别删**：`/usr/bin/ping` 靠文件能力工作，而 unit 开了
+   `NoNewPrivileges=true` 会让文件能力失效——没有它，设备页的「局域网设备」会退化成只能看邻居表。
+2. **服务用户要在 `docker` 组里**（`id` 看一下），否则服务页的容器列表是空的；但不要用 root。
+3. **功耗（RAPL）**：unit 里已经用 `ExecStartPre` 在每次启动时以 root 放开读权限，
+   比手动 chmod 持久（重启机器后不会再丢）；内核不允许时改用 `deploy/60-dashboard-rapl.rules`。
 
-   ```bash
-   sudo cp /home/xiaji/code/dashboard/deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
-   sudo udevadm control --reload-rules
-   sudo udevadm trigger --action=add --subsystem-match=powercap
-   ```
+看板没有 TLS（内置账号鉴权是明文传输的），所以只放行内网网段、别直接映射公网：
 
-   两个坑：`trigger` 必须带 `--action=add`（默认动作是 `change`，不会命中只匹配 `add` 的规则）；
-   只有 `intel-rapl:0` / `intel-rapl:1` 是 udev 设备，`core`/`uncore`/`dram` 子域不是、不会各自触发事件，
-   所以规则里连同子目录一起 chmod。
+```bash
+sudo ufw allow from 192.168.1.0/24 to any port 8282 proto tcp
+```
 
-3. **测试期最省事：先放开一次**（重启后失效，用来马上看到瓦数）：
+要出内网就在前面套一层带 TLS 的反向代理；也可以完全不上网络，只监听回环 + SSH 隧道：
 
-   ```bash
-   sudo chmod 0444 /sys/class/powercap/intel-rapl*/energy_uj
-   ```
+```bash
+DASHBOARD_HOST=127.0.0.1 ./run.sh start
+ssh -L 8282:127.0.0.1:8282 user@server      # 本地打开 http://127.0.0.1:8282
+```
 
-   想开机自动生效又不想用 udev，可以写成 tmpfiles 规则：
-
-   ```bash
-   echo 'z /sys/class/powercap/intel-rapl*/energy_uj 0444 - - -' \
-     | sudo tee /etc/tmpfiles.d/dashboard-rapl.conf
-   sudo systemd-tmpfiles --create /etc/tmpfiles.d/dashboard-rapl.conf
-   ```
-
-   验证（普通用户，能打印数字即可）：
-
-   ```bash
-   cat /sys/class/powercap/intel-rapl:0/energy_uj      # 平台/封装
-   cat /sys/class/powercap/intel-rapl:0:0/energy_uj    # 核心
-   ```
-
-   权限放开后**不用重启看板**：采集层每 60 秒重试一次读取。若只有部分域可读，
-   页面照常显示能读到的部分，并在卡片头注标出「N 项无权限」。
-
-**不建议把看板本身跑成 root**：服务监听 `0.0.0.0` 且无鉴权，一旦被访问就能拿到 root 进程的
-全部能力。上面两种方式都只把「读功耗计数器」这一件事放开。
-
-有权限后能采到的功耗域（这台 i5-7200U 的实测）：
-
-| 域 | 含义 | 角色 |
-| --- | --- | --- |
-| `psys` | 平台功耗 | 主值（最接近整机） |
-| `package-0` | CPU 封装 | 明细行 |
-| `core` | CPU 核心 | 明细行 |
-| `uncore` | 核显与内存控制器 | 明细行 |
-| `dram` | 内存 | 明细行 |
-
-没有 RAPL 权限时不会空着：性能页的功耗卡退化为显示风扇转速，概览页的功耗曲线显示「不可用」并给出原因。
+想统一用 compose 管理就用 `deploy/docker-compose.yml`（**代价写在 `deploy/README.md` 的对比表里**：
+要挂 `docker.sock`＝root 等价、容器里读不到 systemd、功耗仍需在宿主机放开权限）。
 
 ## 配置
 

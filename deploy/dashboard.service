@@ -54,5 +54,12 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 
+# 局域网扫描要发 ICMP：/usr/bin/ping 靠文件能力 cap_net_raw 工作，
+# 而 NoNewPrivileges=true 会让文件能力失效。这里精确把 CAP_NET_RAW 授给服务，
+# 既不放开 NoNewPrivileges，也不必让看板以 root 运行。
+# （没有这两行时，设备页的「局域网设备」会退化成只能看邻居表。）
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
 [Install]
 WantedBy=multi-user.target
