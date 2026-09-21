@@ -253,7 +253,8 @@
     /* 大数字：RAPL 可读时显示功耗瓦数（与参考图一致），不可读时退化为风扇转速 */
     if (power.available) {
       setValue('v-power', power.watts.toFixed(1), 'W');
-      note.textContent = (power.source || 'RAPL') + ' · Intel RAPL';
+      note.textContent = (power.source || 'RAPL') + ' · Intel RAPL' +
+        (power.skipped && power.skipped.length ? ' · ' + power.skipped.length + ' 项无权限' : '');
     } else if (cpuFan) {
       setValue('v-power', cpuFan.rpm, 'RPM');
       note.textContent = power.reason || '';

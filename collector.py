@@ -358,18 +358,26 @@ class Collector:
             return self._rapl_fail(now, "本机没有 Intel RAPL 功耗计数器")
 
         readings = {}
+        skipped = []
+        first_error = None
         for name, path in domains:
             try:
                 with open(path, "r") as handle:
                     readings[name] = int(handle.read().strip())
             except PermissionError:
-                return self._rapl_fail(
-                    now, "读取 RAPL 需要权限：以 root 运行，"
-                         "或用 deploy 里的 udev 规则放开 energy_uj 读权限")
+                skipped.append(name)
+                first_error = first_error or ("读取 RAPL 需要权限：以 root 运行，"
+                                              "或用 deploy 里的 udev 规则放开 energy_uj 读权限")
             except FileNotFoundError:
-                return self._rapl_fail(now, "RAPL 计数器不可读")
+                skipped.append(name)
+                first_error = first_error or "RAPL 计数器不可读"
             except (OSError, ValueError) as exc:
-                return self._rapl_fail(now, f"RAPL 读取失败：{exc}")
+                skipped.append(name)
+                first_error = first_error or f"RAPL 读取失败：{exc}"
+
+        if not readings:
+            # 一个域都读不到：给出统一原因（权限不足最常见）
+            return self._rapl_fail(now, first_error or "RAPL 计数器不可读")
 
         watts = {}
         for name, energy in readings.items():
@@ -399,6 +407,8 @@ class Collector:
             "watts": watts[primary],
             "source": RAPL_LABELS.get(primary, primary),
             "domains": detail,
+            # 读不到的域（例如只放开了顶层权限，子域仍是 0400）
+            "skipped": skipped,
         }
 
     def _net(self, now):

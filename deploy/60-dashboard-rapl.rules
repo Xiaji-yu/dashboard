@@ -1,15 +1,20 @@
-# 让 RAPL 功耗计数器对普通用户可读（备选方案）
+# 让 RAPL 功耗计数器对普通用户可读
 #
-# 何时用：不想在服务单元里用 ExecStartPre 改权限，或内核/策略不允许服务改 sysfs 时。
-# 安装（注意 trigger 必须带 --action=add：默认动作是 change，只会触发 change 分支的规则）：
-#   sudo cp deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
+# 重要：只有 intel-rapl:0 / intel-rapl:1 是 udev 设备，core/uncore/dram 这些子域
+# （intel-rapl:0:0 / :0:1 / :0:2）不是，不会各自触发 udev 事件——所以下面
+# 连同子目录里的 energy_uj 一起 chmod，否则功耗构成会缺几项。
+#
+# 安装：
+#   sudo cp /home/xiaji/code/dashboard/deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload-rules
 #   sudo udevadm trigger --action=add --subsystem-match=powercap
-# 验证（不需要 sudo，能打印数字就成了）：
-#   cat /sys/class/powercap/intel-rapl:0/energy_uj
-# 生效后不必重启看板：采集层每 60 秒会重试一次读取。
+# 注意 trigger 必须带 --action=add：默认动作是 change，不会命中只匹配 add 的规则。
 #
-# 说明：powercap 的 energy_uj 默认是 0400 root，这里是把它改成所有用户可读（0444）。
-# 该文件只暴露累计能量（微焦），不涉及敏感信息。
+# 验证（不需要 sudo，能打印出数字就成了）：
+#   cat /sys/class/powercap/intel-rapl:0/energy_uj
+#   cat /sys/class/powercap/intel-rapl:0:0/energy_uj
+#
+# 生效后不必重启看板：采集层每 60 秒会重试一次读取。
+# 说明：energy_uj 只暴露累计能量（微焦），不涉及敏感信息。
 
-ACTION=="add", SUBSYSTEM=="powercap", KERNEL=="intel-rapl*", RUN+="/bin/chmod 0444 /sys%p/energy_uj"
+ACTION=="add", SUBSYSTEM=="powercap", KERNEL=="intel-rapl*", RUN+="/bin/sh -c 'chmod 0444 /sys%p/energy_uj /sys%p/*/energy_uj 2>/dev/null || true'"

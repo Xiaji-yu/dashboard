@@ -337,6 +337,30 @@ class PowerRaplTest(unittest.TestCase):
         self.assertFalse(result["available"])
         self.assertIn("预热", result["reason"])
 
+    def test_partial_permission_keeps_readable_domains(self):
+        """只放开部分域时，剩下能读的照常显示，而不是整块变不可用。"""
+        bad = self.write_domain("package-0", 1000000, 0)
+        self.write_domain("psys", 1000000, 1)
+        os.chmod(bad, 0o000)
+        self.addCleanup(os.chmod, bad, 0o644)
+
+        self.collector._power(1000.0)          # 首次只更新基准
+        self.write_domain("psys", 2000000, 1)
+        result = self.collector._power(1001.0)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["source"], "平台功耗")
+        self.assertAlmostEqual(result["watts"], 1.0, places=3)
+        self.assertEqual(result["skipped"], ["package-0"])
+        self.assertEqual([item["name"] for item in result["domains"]], ["psys"])
+
+    def test_all_domains_unreadable_reports_permission(self):
+        path = self.write_domain("package-0", 1000000, 0)
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o644)
+        result = self.collector._power(1000.0)
+        self.assertFalse(result["available"])
+        self.assertIn("root", result["reason"])
+
     def test_retries_after_cooldown(self):
         """权限往往是事后才放开的：冷却结束后自动恢复，不必重启服务。"""
         path = self.write_domain("package-0", 1000000, 0)

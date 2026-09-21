@@ -78,7 +78,7 @@ systemctl status dashboard
 
 1. **服务单元里的 `ExecStartPre`（默认已写好，推荐）**：systemd 以 root 身份在启动时执行一次
    `chmod 0444 /sys/class/powercap/intel-rapl*/energy_uj`，服务进程本身仍是普通用户。
-2. **udev 规则（备选）**：`deploy/60-dashboard-rapl.rules`，装好后每次设备出现都会放开读权限：
+2. **udev 规则（备选）**：`deploy/60-dashboard-rapl.rules`。
 
    ```bash
    sudo cp /home/xiaji/code/dashboard/deploy/60-dashboard-rapl.rules /etc/udev/rules.d/
@@ -86,10 +86,33 @@ systemctl status dashboard
    sudo udevadm trigger --action=add --subsystem-match=powercap
    ```
 
-   注意 `trigger` 要带 `--action=add`（默认动作是 `change`，不会触发只匹配 `add` 的规则）。
-   验证（普通用户，能打印数字即可）：`cat /sys/class/powercap/intel-rapl:0/energy_uj`
+   两个坑：`trigger` 必须带 `--action=add`（默认动作是 `change`，不会命中只匹配 `add` 的规则）；
+   只有 `intel-rapl:0` / `intel-rapl:1` 是 udev 设备，`core`/`uncore`/`dram` 子域不是、不会各自触发事件，
+   所以规则里连同子目录一起 chmod。
 
-   权限放开后**不用重启看板**：采集层每 60 秒会重试一次读取。
+3. **测试期最省事：先放开一次**（重启后失效，用来马上看到瓦数）：
+
+   ```bash
+   sudo chmod 0444 /sys/class/powercap/intel-rapl*/energy_uj
+   ```
+
+   想开机自动生效又不想用 udev，可以写成 tmpfiles 规则：
+
+   ```bash
+   echo 'z /sys/class/powercap/intel-rapl*/energy_uj 0444 - - -' \
+     | sudo tee /etc/tmpfiles.d/dashboard-rapl.conf
+   sudo systemd-tmpfiles --create /etc/tmpfiles.d/dashboard-rapl.conf
+   ```
+
+   验证（普通用户，能打印数字即可）：
+
+   ```bash
+   cat /sys/class/powercap/intel-rapl:0/energy_uj      # 平台/封装
+   cat /sys/class/powercap/intel-rapl:0:0/energy_uj    # 核心
+   ```
+
+   权限放开后**不用重启看板**：采集层每 60 秒重试一次读取。若只有部分域可读，
+   页面照常显示能读到的部分，并在卡片头注标出「N 项无权限」。
 
 **不建议把看板本身跑成 root**：服务监听 `0.0.0.0` 且无鉴权，一旦被访问就能拿到 root 进程的
 全部能力。上面两种方式都只把「读功耗计数器」这一件事放开。
