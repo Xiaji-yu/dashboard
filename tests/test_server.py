@@ -145,7 +145,8 @@ class HttpApiTest(unittest.TestCase):
         payload = json.loads(body)
         self.assertTrue(payload["ready"])
         for key in ("ts", "host", "cores", "cpu", "memory", "power", "net", "disk",
-                    "temp", "load", "processes", "process_count", "services", "window"):
+                    "temp", "load", "processes", "process_count", "services", "window",
+                    "interval"):
             self.assertIn(key, payload)
         self.assertIsInstance(payload["processes"], list)
         self.assertIsInstance(payload["services"], list)
@@ -160,6 +161,7 @@ class HttpApiTest(unittest.TestCase):
         payload = json.loads(body)
         self.assertIn("series", payload)
         self.assertGreater(payload["ts"], 0)
+        self.assertGreater(payload["interval"], 0, "要带上采样间隔，前端据此设置断线阈值")
         for key in server.SERIES_KEYS:
             self.assertIn(key, payload["series"])
 
@@ -183,7 +185,7 @@ class HttpApiTest(unittest.TestCase):
         payload = json.loads(body)
         self.assertTrue(payload["ready"])
         for key in ("ts", "cpu", "gpu", "temps", "fans", "battery", "memory", "load",
-                    "power", "window"):
+                    "power", "window", "interval"):
             self.assertIn(key, payload, key)
         self.assertIsInstance(payload["temps"].get("list", []), list)
 

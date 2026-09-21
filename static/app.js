@@ -20,6 +20,12 @@ var PAGE_TITLES = {
 
 var state = { paused: false, tick: 0, page: null, pageTimer: null };
 
+/* 每个页面各自记「上一次请求是否还在飞」：切后台回前台时 visibilitychange 会立刻补拉，
+   setInterval 的 tick 也可能同时在飞，两者用同一个旧 since 会拉到同一批点并各追加一次，
+   曲线里就出现倒退的连线。并发触发时直接跳过，等上一次回来。 */
+var tickInFlight = {};
+var badgesInFlight = false;
+
 /* ---------------- 小工具（页面模块全局可用） ---------------- */
 
 function esc(value) {
@@ -125,10 +131,28 @@ function updateBadges(ov) {
 function pollBadges() {
   var page = DashPages[state.page];
   if (page && page.badges === false) return;  // 概览页自己全量刷新并更新徽章
-  if (state.paused || document.hidden) return;
+  if (state.paused || document.hidden || badgesInFlight) return;
+  badgesInFlight = true;
   fetchJSON('/api/overview').then(function (ov) {
     if (ov.ready) updateBadges(ov);
-  }).catch(function () { /* 连接状态由当前页面的 tick 负责 */ });
+  }).catch(function () { /* 连接状态由当前页面的 tick 负责 */ })
+    .then(function () { badgesInFlight = false; });
+}
+
+/* 统一的页面轮询入口：合并 setInterval / visibilitychange / 取消暂停 三种触发 */
+function runPageTick(page) {
+  var id = state.page;
+  if (tickInFlight[id]) return;
+  tickInFlight[id] = true;
+  var done = function () { tickInFlight[id] = false; };
+  var result;
+  try {
+    result = page.tick();
+  } catch (err) {
+    done();
+    throw err;
+  }
+  Promise.resolve(result).then(done, done);
 }
 
 /* ---------------- hash 路由 ---------------- */
@@ -179,7 +203,7 @@ function mountPage(id, host) {
   var page = DashPages[id];
   if (page.title) document.title = page.title + ' · 总控台';
   page.mount(host);
-  var run = function () { page.tick(); };
+  var run = function () { runPageTick(page); };
   run();
   state.pageTimer = setInterval(run, page.interval || 1000);
 }
@@ -202,7 +226,7 @@ document.getElementById('pause').addEventListener('click', function () {
   } else {
     setLive('实时更新中', '');
     var page = DashPages[state.page];
-    if (page) page.tick();
+    if (page) runPageTick(page);
     pollBadges();
   }
 });
@@ -220,6 +244,6 @@ pollBadges();
 document.addEventListener('visibilitychange', function () {
   if (document.hidden || state.paused) return;
   var page = DashPages[state.page];
-  if (page) page.tick();
+  if (page) runPageTick(page);
   pollBadges();
 });

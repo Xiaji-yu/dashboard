@@ -365,6 +365,10 @@
   function applySeries(data) {
     var series = data.series || {};
     if (data.ts) lastSeriesTs = data.ts;
+    if (data.interval) {
+      var gap = Math.max(6, data.interval * 4);
+      Object.keys(charts).forEach(function (name) { charts[name].chart.setGap(gap); });
+    }
     Object.keys(charts).forEach(function (name) {
       var inst = charts[name];
       inst.spec.series.forEach(function (spec) {

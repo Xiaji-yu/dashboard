@@ -168,6 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         payload = dict(snapshot)
         payload["ready"] = True
         payload["window"] = WINDOW_SECONDS
+        payload["interval"] = INTERVAL
         payload["services"] = self.collector.services()
         return payload
 
@@ -180,6 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         payload["ready"] = True
         payload["ts"] = snapshot["ts"]
         payload["window"] = WINDOW_SECONDS
+        payload["interval"] = INTERVAL
         return payload
 
     @staticmethod
@@ -192,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
             series = {key: history.window(key) for key in selected}
         else:
             series = {key: history.since(key, since_ts) for key in selected}
-        return {"ts": ts, "window": WINDOW_SECONDS, "series": series}
+        return {"ts": ts, "window": WINDOW_SECONDS, "interval": INTERVAL, "series": series}
 
     # ---------------- 响应 ----------------
 

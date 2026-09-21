@@ -12,8 +12,8 @@
     return node;
   }
 
-  /* 点列 -> 路径字符串；null 处断开成多段。坐标系固定 0-100 x 0-100。 */
-  function buildPaths(points, t0, t1, yMin, yMax) {
+  /* 点列 -> 路径字符串；null 与时间断层处断开成多段。坐标系固定 0-100 x 0-100。 */
+  function buildPaths(points, t0, t1, yMin, yMax, maxGap) {
     var span = Math.max(0.001, t1 - t0);
     var ySpan = Math.max(0.0001, yMax - yMin);
     var segments = [];
@@ -25,6 +25,12 @@
       if (value === null || value === undefined || !isFinite(value)) {
         if (current.length) { segments.push(current); current = []; }
         continue;
+      }
+      /* 采样中断（服务重启、机器休眠、前台长时间没轮询）会让相邻点时间跳很远，
+         此时必须断开，否则 SVG 会横穿整张图画一条直线。 */
+      if (current.length && ts - points[i - 1][0] > maxGap) {
+        segments.push(current);
+        current = [];
       }
       var x = ((ts - t0) / span) * 100;
       var y = 100 - ((value - yMin) / ySpan) * 96 - 2;  /* 上下各留 2 的余量给线宽 */
@@ -63,10 +69,11 @@
    *   fixed:  [min, max]                   固定量程；省略则按窗口内峰值自适应
    *   autoMinTop: 自适量程的最小上限（避免小数值把噪声放大）
    *   window: 时间窗口秒数
+   *   gap:    两点间隔超过该秒数就断线，不连成直线（默认 15）
    */
   function createChart(host, options) {
     var opts = Object.assign(
-      { series: [], fixed: null, autoMinTop: 1, window: 120 }, options || {}
+      { series: [], fixed: null, autoMinTop: 1, window: 120, gap: 15 }, options || {}
     );
     var uid = 'spark' + Math.random().toString(36).slice(2, 9);
     var svg = el('svg', { viewBox: '0 0 100 100', preserveAspectRatio: 'none' });
@@ -127,16 +134,28 @@
     }
 
     return {
-      /** 追加增量点；pts 为 [[ts, value], ...] */
+      /** 追加增量点；pts 为 [[ts, value], ...]
+       *  只接受比已有点更新的时间戳：并发轮询可能把同一批点追加两次，
+       *  重复或回退的点会让曲线倒退画出一条横穿画面的直线。 */
       append: function (key, pts) {
         var track = tracks[key];
         if (!track || !pts || !pts.length) return;
-        for (var i = 0; i < pts.length; i++) track.points.push(pts[i]);
+        var last = track.points.length ? track.points[track.points.length - 1][0] : -Infinity;
+        for (var i = 0; i < pts.length; i++) {
+          if (pts[i][0] <= last) continue;
+          track.points.push(pts[i]);
+          last = pts[i][0];
+        }
       },
 
       setFixed: function (range) { fixed = range || null; },
 
       setWindow: function (seconds) { opts.window = seconds; },
+
+      /** 采样间隔变化时同步断线阈值（一般设为间隔的 4 倍以上） */
+      setGap: function (seconds) {
+        if (seconds > 0) opts.gap = seconds;
+      },
 
       /** 隐藏曲线并显示「不可用」提示 */
       setUnavailable: function (reason) {
@@ -166,7 +185,7 @@
         var t0 = nowTs - opts.window;
         order.forEach(function (key) {
           var track = tracks[key];
-          var paths = buildPaths(track.points, t0, nowTs, yMin, yMax);
+          var paths = buildPaths(track.points, t0, nowTs, yMin, yMax, opts.gap);
           track.line.setAttribute('d', paths[0]);
           if (track.filled) track.area.setAttribute('d', paths[1]);
         });

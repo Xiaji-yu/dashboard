@@ -19,6 +19,7 @@ pip install -r requirements-dev.txt
 
 ```bash
 python3 -m unittest discover -v      # 全部用例应在数秒内通过
+node tests/chart.test.js             # 前端图表用例
 ruff check .                         # 无告警
 ```
 

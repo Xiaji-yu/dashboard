@@ -26,7 +26,8 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 - **省流量的增量接口**：曲线数据走 `since` 游标，每秒只传新增的点，不是每次重传整窗口。
 - **真实数据源**：`psutil` + `/proc/net/tcp{,6}` + `docker ps`，不依赖任何外部服务或云端。
 - **可配置**：监听地址、端口、采样间隔、统计哪块网卡、看哪个挂载点都能用环境变量改。
-- **有测试**：44 个用例覆盖采集、缓冲、接口契约与降级路径，CI 里跑 ruff + 测试。
+- **有测试**：66 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 8 个前端图表用例
+  守住曲线绘制；CI 里跑 ruff + 两套测试 + 接口冒烟。
 
 ## 截图
 
@@ -138,12 +139,15 @@ $ curl -s localhost:8282/api/overview | python3 -m json.tool | head -12
 ```bash
 pip install -r requirements-dev.txt
 
-python3 -m unittest discover -v      # 44 个用例，约 1 秒
+python3 -m unittest discover -v      # 66 个 Python 用例，约 1 秒
+node tests/chart.test.js             # 8 个前端图表用例（不需要浏览器）
 ruff check .                         # 代码风格（行宽 120，规则集 E/F/W）
 ./run.sh fg                          # 前台跑起来看效果
 ```
 
 测试用标准库 `unittest` 编写，因此**不装 pytest 也能跑**；pytest 同样可以直接收集。
+图表用例用 Node 直接桩出最小 DOM 跑 `static/chart.js`，覆盖「重复点/时间断层不能连成直线」这类
+只在浏览器里才暴露的问题。
 接口测试在 `127.0.0.1` 的空闲端口上真起一个服务（`port=0` 交给内核分配），
 所以不会和在跑的 8282 抢端口，也不依赖网络。
 
@@ -162,7 +166,7 @@ dashboard/
 │   ├── chart.js           # 手绘 SVG 折线图
 │   ├── app.js             # 前端核心：路由、徽章轮询、公共工具
 │   └── pages/             # 页面模块（概览、性能与电源……）按需加载
-├── tests/                 # unittest 用例
+├── tests/                 # Python 用例 + chart.test.js（Node 前端图表用例）
 ├── docs/
 │   ├── screenshot.png     # 本项目运行截图
 │   └── reference/         # UI 参考图（见该目录 README）

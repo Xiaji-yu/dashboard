@@ -50,6 +50,24 @@ jobs:
           curl -fsS http://127.0.0.1:8282/api/overview \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ready'], d; print('overview OK, host=', d['host'])"
           curl -fsS http://127.0.0.1:8282/api/series \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'cpu' in d['series']; print('series OK')"
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'cpu' in d['series']; assert d['interval'] > 0; print('series OK')"
+          curl -fsS http://127.0.0.1:8282/api/performance \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ready'], d; print('performance OK, 每核=', len(d['cpu']['per_core']['per_cpu']))"
           curl -fsS -o /dev/null http://127.0.0.1:8282/static/app.js
+          curl -fsS -o /dev/null http://127.0.0.1:8282/static/pages/performance.js
           echo "静态资源 OK"
+
+  frontend:
+    name: 前端图表测试（Node）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 图表库回归测试
+        run: node tests/chart.test.js

@@ -255,6 +255,7 @@
   function applySeries(data, ov) {
     var series = data.series || {};
     if (data.ts) lastSeriesTs = data.ts;
+    if (data.interval) syncGaps(data.interval);
     Object.keys(charts).forEach(function (name) {
       var inst = charts[name];
       if (!inst.chart) return;
@@ -264,6 +265,14 @@
       });
       var peak = inst.chart.redraw(data.ts);
       updateRange(inst.spec, peak, ov);
+    });
+  }
+
+  /* 断线阈值跟随服务端采样间隔（一般采样 1s，阈值 6s 以上） */
+  function syncGaps(interval) {
+    var gap = Math.max(6, interval * 4);
+    Object.keys(charts).forEach(function (name) {
+      if (charts[name].chart) charts[name].chart.setGap(gap);
     });
   }
 
