@@ -1345,3 +1345,142 @@ body {
   .dev-chips { font-size: 11.5px; gap: 2px 14px; }
   .usb-row, .bt-row, .iface-row, .pci-row { font-size: 11.5px; padding: 3px 0; }
 }
+
+/* ---------------- 登录页与账号弹窗 ---------------- */
+
+.login-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+
+.login-wrap { width: 100%; max-width: 348px; }
+
+.login-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 24px 22px 20px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.login-brand .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(61, 220, 151, 0.8);
+}
+
+.login-title { font-size: 22px; font-weight: 300; color: var(--text); }
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.login-field input {
+  padding: 9px 12px;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+}
+
+.login-field input:focus { border-color: rgba(61, 220, 151, 0.45); }
+
+.login-button {
+  margin-top: 4px;
+  padding: 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #0d1a14;
+  background: var(--green);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.login-button:hover { filter: brightness(1.08); }
+.login-button:disabled { opacity: 0.6; cursor: default; }
+
+.login-error { font-size: 12px; color: var(--pink); }
+.login-error.show { min-height: 16px; }
+
+.login-tip {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--dim);
+  line-height: 1.6;
+}
+
+/* 账号弹窗 */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(10, 7, 15, 0.66);
+}
+
+.modal[hidden] { display: none; }
+
+.modal-card {
+  width: 100%;
+  max-width: 380px;
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 16px 16px;
+}
+
+.modal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.modal-actions .side-btn { margin-top: 0; }

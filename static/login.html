@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>登录 · 总控台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#17111f">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+<main class="login-wrap">
+  <form class="login-card" id="login-form" method="post" action="/api/login">
+    <div class="login-brand">
+      <span class="dot" id="login-dot"></span>
+      <span id="login-host">总控台</span>
+    </div>
+    <div class="login-title">登录</div>
+
+    <label class="login-field">
+      <span>账号</span>
+      <input id="login-user" name="username" type="text" autocomplete="username"
+             autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    </label>
+
+    <label class="login-field">
+      <span>密码</span>
+      <input id="login-pass" name="password" type="password"
+             autocomplete="current-password" required>
+    </label>
+
+    <div class="login-error" id="login-error" role="alert"></div>
+    <button class="login-button" type="submit" id="login-submit">登录</button>
+    <p class="login-tip">
+      首次登录用启动日志里的初始密码；登录后可在侧栏「账号」里修改密码。
+    </p>
+  </form>
+</main>
+<script src="/static/login.js"></script>
+</body>
+</html>

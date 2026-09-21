@@ -30,6 +30,9 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 - **省流量的增量接口**：曲线数据走 `since` 游标，每秒只传新增的点，不是每次重传整窗口。
 - **真实数据源**：`psutil` + `/proc/net/tcp{,6}` + `docker ps`，不依赖任何外部服务或云端。
 - **可配置**：监听地址、端口、采样间隔、统计哪块网卡、看哪个挂载点都能用环境变量改。
+- **账号鉴权**：登录后才能看数据。口令用 PBKDF2-HMAC-SHA256（20 万轮 + 每用户随机盐）存储，
+  会话是 HttpOnly + SameSite=Lax 的 Cookie；**首次启动自动生成随机密码并打印到日志**，
+  登录后可在侧栏「账号」里改密码 / 改用户名 / 退出全部设备；登录失败按来源 IP 限速。
 - **有测试**：66 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 8 个前端图表用例
   守住曲线绘制；CI 里跑 ruff + 两套测试 + 接口冒烟。
 
@@ -51,8 +54,16 @@ pip install -r requirements.txt
 ./run.sh start        # 后台启动，日志写入 server.log
 ```
 
-打开 <http://127.0.0.1:8282/>。默认监听 `0.0.0.0`，所以同网段的机器也能用
-`http://<本机IP>:8282/` 访问。
+打开 <http://127.0.0.1:8282/>，会先看到登录页。**首次启动的随机账号密码在日志里**：
+
+```console
+$ ./run.sh log | grep auth
+[auth] 首次启动，已生成初始账号：admin / Hfpz9QFSa68fEVfQZTRT
+[auth] 凭据文件：/home/xiaji/code/dashboard/auth.json（权限 600，已加入 .gitignore；登录后请自行修改密码）
+```
+
+登录后建议立刻在侧栏「账号」里改掉密码。默认监听 `0.0.0.0`，所以同网段的机器也能用
+`http://<本机IP>:8282/` 访问（同样需要登录）。
 
 其他命令：
 
@@ -144,10 +155,23 @@ systemctl status dashboard
 | `DASHBOARD_INTERVAL` | `1.0` | 采样间隔（秒） |
 | `DASHBOARD_NIC` | 自动挑选 | 指定统计哪块网卡，如 `eth0` |
 | `DASHBOARD_DISK` | `/` | 指定统计哪个挂载点 |
+| `DASHBOARD_AUTH_FILE` | 项目目录 `auth.json` | 凭据文件路径（600 权限，已 gitignore） |
+| `DASHBOARD_USER` | `admin` | 初始用户名（**仅在凭据文件不存在时生效**） |
+| `DASHBOARD_PASSWORD` | 随机 20 位 | 初始密码（同上；留空则随机生成并打印到日志） |
 
 ```bash
 DASHBOARD_PORT=9000 DASHBOARD_HOST=127.0.0.1 ./run.sh start
 ```
+
+### 账号与会话
+
+- 凭据文件 `auth.json` 只存口令哈希（PBKDF2-HMAC-SHA256，20 万轮，每用户随机盐）与活跃会话令牌，
+  权限 600，**已加入 .gitignore**；
+- 首次启动若文件不存在，就生成随机密码：写进该文件并打印到日志（见上）；
+  也可以用 `DASHBOARD_USER` / `DASHBOARD_PASSWORD` 指定（只在首次生成时生效）；
+- 会话默认 7 天有效，最多保留 20 个；**改密码会把其他设备的会话全部踢掉**（当前设备保留）；
+- 登录失败按来源 IP 限速：5 分钟内 5 次失败后需等待；成功登录会清空计数；
+- 删掉 `auth.json` 再启动即可**重置账号**（会重新生成随机密码并打印）。
 
 ### 远程探测目标（服务页）
 
@@ -166,8 +190,15 @@ DASHBOARD_PORT=9000 DASHBOARD_HOST=127.0.0.1 ./run.sh start
 
 ## 接口
 
+除了登录相关接口，**其余接口都需要先登录**（未登录时接口返回 401，页面跳转登录页）。
+
 | 接口 | 说明 |
 | --- | --- |
+| `GET /login` | 登录页（公开） |
+| `POST /api/login` | 登录，JSON `{username, password}`，成功下发会话 Cookie |
+| `POST /api/logout` | 退出登录（`{"all": true}` 为退出全部设备） |
+| `GET /api/auth` | 当前登录状态（公开，登录页用它判断是否已登录） |
+| `POST /api/password` | 修改密码 / 用户名，JSON `{old_password, new_password?, new_username?}` |
 | `GET /` | 看板页面 |
 | `GET /api/overview` | 瞬时快照：全部指标 + 最忙进程 Top6 + 服务状态 |
 | `GET /api/series` | 曲线数据（最近 120 秒全窗口） |
@@ -276,19 +307,20 @@ $ curl -s localhost:8282/api/overview | python3 -m json.tool | head -12
 
 ## 安全提示
 
-当前定位是**本机 / 内网自用，仍在测试阶段**，没有暴露公网；**鉴权尚未实现**（在路线图里，
-见 `CHANGELOG.md`）。下面是「将来要放给更大范围访问」时的注意事项：
+内置账号鉴权（口令哈希 + 会话 Cookie + 登录限速），**但请仍然按内网自用来部署**：
 
-**本项目不包含任何身份验证**，任何能连上端口的人都能看到主机名、IP、进程名、容器名和端口清单。
+- 服务是明文 HTTP，**没有 TLS**：不要把端口直接映射到公网。确实需要公网访问，请放在带 TLS 的
+  反向代理后面，或只监听 `127.0.0.1` 再用 SSH 隧道：
 
-- 只在可信网络里监听 `0.0.0.0`；不确定就用 `DASHBOARD_HOST=127.0.0.1` 配合 SSH 隧道：
   ```bash
-  ssh -L 8282:127.0.0.1:8282 user@server
+  DASHBOARD_HOST=127.0.0.1 ./run.sh start
+  ssh -L 8282:127.0.0.1:8282 user@server     # 本地打开 http://127.0.0.1:8282
   ```
-  然后本地打开 <http://127.0.0.1:8282>。
-- 不要把端口直接映射到公网。若必须公网访问，请放在带认证的反向代理后面。
 
-详见 [SECURITY.md](SECURITY.md)。
+- 首次登录后请立刻改密码；`auth.json` 请勿提交到仓库（已在 `.gitignore` 里）或分享给他人。
+- 登录失败限速是「每 IP 5 次 / 5 分钟」，能挡脚本爆破，但挡不住分布式猜测——密码请设长一些。
+
+细节见 [SECURITY.md](SECURITY.md)。
 
 ## 开发
 
@@ -357,7 +389,7 @@ UI 结构参考了一组 macOS 系统监控面板的截图（见 `docs/reference
 
 ## 已知限制
 
-- 无鉴权（见上）。
+- 没有 TLS，也没有多用户 / 权限分级：只有一组账号，登录后能看到全部指标。
 - 曲线历史只存在内存里，服务重启后重新累积（最多 1200 点 / 约 20 分钟）。
 - 功耗依赖 Intel RAPL 且需要 root，多数桌面环境会显示「不可用」（性能页会给出原因）。
 - 容器面板每 5 秒执行一次 `docker ps`；docker 卡住时最多影响该面板状态。

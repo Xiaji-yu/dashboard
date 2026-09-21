@@ -26,10 +26,39 @@
       <div class="foot-line">已开机 <span id="uptime" class="mono">—</span></div>
       <div class="foot-line mono" id="clock">—</div>
       <button class="side-btn" id="pause">暂停更新</button>
+      <button class="side-btn" id="account">账号</button>
     </div>
   </aside>
 
   <main class="main" id="page-host"></main>
+</div>
+
+<div class="modal" id="account-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="账号">
+    <div class="modal-head">
+      <span>账号</span>
+      <button class="modal-close" id="account-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="kv-row"><span>当前账号</span><b id="account-user">—</b></div>
+      <div class="kv-row"><span>登录状态</span><b id="account-state">—</b></div>
+      <label class="login-field"><span>当前密码（修改时必填）</span>
+        <input id="account-old" type="password" autocomplete="current-password"></label>
+      <label class="login-field"><span>新密码（留空表示不改）</span>
+        <input id="account-new" type="password" autocomplete="new-password"></label>
+      <label class="login-field"><span>确认新密码</span>
+        <input id="account-confirm" type="password" autocomplete="new-password"></label>
+      <label class="login-field"><span>新用户名（留空表示不改）</span>
+        <input id="account-newuser" type="text" autocapitalize="off" spellcheck="false"></label>
+      <div class="login-error" id="account-message" role="alert"></div>
+      <div class="modal-actions">
+        <button class="side-btn" id="account-save" type="button">保存修改</button>
+        <button class="side-btn" id="account-logout" type="button">退出登录</button>
+        <button class="side-btn" id="account-logout-all" type="button">退出全部设备</button>
+      </div>
+      <p class="login-tip">改密码后，其他设备上的登录会立即失效（当前这台保持登录）。</p>
+    </div>
+  </div>
 </div>
 
 <script src="/static/chart.js"></script>

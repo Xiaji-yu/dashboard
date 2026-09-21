@@ -6,11 +6,14 @@
 
 import http.client
 import json
+import os
+import tempfile
 import threading
 import time
 import unittest
 
 import server
+from auth import AuthStore
 from collector import Collector
 
 
@@ -103,6 +106,10 @@ class SeriesKeyWhitelistTest(unittest.TestCase):
 
 
 class HttpApiTest(unittest.TestCase):
+    """已登录状态下的接口契约。服务建在空闲端口上，不和在跑的 8282 抢。"""
+
+    PASSWORD = "http-test-pass-1"
+
     @classmethod
     def setUpClass(cls):
         cls.collector = Collector()
@@ -115,28 +122,59 @@ class HttpApiTest(unittest.TestCase):
 
         with server.state_lock:
             server.state["snapshot"] = snapshot
+            server.state["series_ts"] = snapshot["ts"]
             server.state["processes"] = rows
             server.state["network"] = cls.collector.network_info()
             server.state["services"] = cls.collector.services_detail()
-            server.state["series_ts"] = snapshot["ts"]
             for key, value in server.series_values(snapshot).items():
                 server.state["history"].append(key, snapshot["ts"], value)
 
-        cls.httpd = server.create_server(cls.collector, "127.0.0.1", 0)
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.auth = AuthStore(os.path.join(cls.tmp.name, "auth.json"), username="tester",
+                             password=cls.PASSWORD, logger=lambda message: None)
+        cls.httpd = server.create_server(cls.collector, "127.0.0.1", 0, auth=cls.auth)
         cls.port = cls.httpd.server_address[1]
         cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
         cls.thread.start()
+
+        status, headers, _body = cls.raw("POST", "/api/login",
+                                         {"username": "tester", "password": cls.PASSWORD})
+        assert status == 200, f"登录失败：{status}"
+        cls.cookie = (headers.get("set-cookie") or "").split(";")[0]
+        assert cls.cookie, "登录应当下发会话 Cookie"
 
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
         cls.httpd.server_close()
         cls.thread.join(timeout=5)
+        cls.tmp.cleanup()
+
+    @classmethod
+    def raw(cls, method, path, payload=None, cookie=None,
+            content_type="application/json"):
+        """发原始请求，返回 (状态码, 小写响应头, 响应体)。"""
+        conn = http.client.HTTPConnection("127.0.0.1", cls.port, timeout=10)
+        try:
+            headers = {}
+            if cookie:
+                headers["Cookie"] = cookie
+            body = None
+            if payload is not None:
+                body = json.dumps(payload).encode("utf-8")
+                headers["Content-Type"] = content_type
+            conn.request(method, path, body=body, headers=headers)
+            response = conn.getresponse()
+            data = response.read()
+            return (response.status,
+                    {key.lower(): value for key, value in response.getheaders()}, data)
+        finally:
+            conn.close()
 
     def request(self, path):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            conn.request("GET", path)
+            conn.request("GET", path, headers={"Cookie": self.cookie})
             response = conn.getresponse()
             return response.status, response.getheader("Content-Type") or "", response.read()
         finally:
@@ -290,6 +328,151 @@ class HttpApiTest(unittest.TestCase):
             status, _, body = self.request(path)
             self.assertEqual(status, 404, path)
             self.assertNotIn(b"import", body, path)
+
+
+class AuthFlowTest(unittest.TestCase):
+    """登录流程：未登录拦截、错密码、CSRF、改密、退出、限速。每个用例独立起一个服务。"""
+
+    PASSWORD = "flow-pass-1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.auth = AuthStore(os.path.join(self.tmp.name, "auth.json"), username="tester",
+                              password=self.PASSWORD, logger=lambda message: None)
+        self.httpd = server.create_server(Collector(), "127.0.0.1", 0, auth=self.auth)
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._stop)
+
+    def _stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+
+    def raw(self, method, path, payload=None, cookie=None, content_type="application/json"):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            headers = {}
+            if cookie:
+                headers["Cookie"] = cookie
+            body = None
+            if payload is not None:
+                body = json.dumps(payload).encode("utf-8")
+                headers["Content-Type"] = content_type
+            conn.request(method, path, body=body, headers=headers)
+            response = conn.getresponse()
+            data = response.read()
+            return (response.status,
+                    {key.lower(): value for key, value in response.getheaders()}, data)
+        finally:
+            conn.close()
+
+    def login(self, password=None):
+        status, headers, body = self.raw("POST", "/api/login", {
+            "username": "tester", "password": self.PASSWORD if password is None else password})
+        return status, headers, body
+
+    def test_protected_api_needs_session(self):
+        status, headers, body = self.raw("GET", "/api/overview")
+        self.assertEqual(status, 401)
+        self.assertIn("application/json", headers.get("content-type", ""))
+        self.assertEqual(json.loads(body)["error"], "unauthorized")
+
+    def test_page_redirects_to_login(self):
+        status, headers, _body = self.raw("GET", "/")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers.get("location"), "/login")
+        status, headers, body = self.raw("GET", "/login")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers.get("content-type", ""))
+        self.assertIn(b"login-form", body)
+
+    def test_login_page_assets_are_public(self):
+        for path, expected in (("/static/style.css", "text/css"),
+                               ("/static/login.js", "javascript")):
+            status, headers, body = self.raw("GET", path)
+            self.assertEqual(status, 200, path)
+            self.assertIn(expected, headers.get("content-type", ""), path)
+            self.assertTrue(body)
+
+    def test_app_assets_need_session(self):
+        for path in ("/static/app.js", "/static/pages/overview.js", "/"):
+            status, _headers, _body = self.raw("GET", path)
+            self.assertIn(status, (302, 401), path)
+
+    def test_login_success_sets_httponly_cookie(self):
+        status, headers, body = self.login()
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        cookie = headers.get("set-cookie") or ""
+        self.assertIn(server.SESSION_COOKIE + "=", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Lax", cookie)
+        token = cookie.split(";")[0]
+        status, _headers, body = self.raw("GET", "/api/auth", cookie=token)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["authenticated"])
+
+    def test_login_wrong_password(self):
+        status, _headers, body = self.login("wrong-password")
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(body)["error"], "invalid_credentials")
+
+    def test_login_rejects_non_json(self):
+        """跨站表单发不了 JSON，所以要求 JSON 内容类型即可挡掉 CSRF。"""
+        status, _headers, _body = self.raw(
+            "POST", "/api/login", {"username": "tester", "password": self.PASSWORD},
+            content_type="application/x-www-form-urlencoded")
+        self.assertEqual(status, 403)
+
+    def test_login_rate_limited_after_failures(self):
+        for _ in range(5):
+            self.login("wrong-password")
+        status, _headers, body = self.login("wrong-password")
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(body)["error"], "rate_limited")
+        self.assertIn("秒后再试", json.loads(body)["message"])
+
+    def test_logout_invalidates_session(self):
+        _status, headers, _body = self.login()
+        cookie = (headers.get("set-cookie") or "").split(";")[0]
+        status, _headers, _body = self.raw("POST", "/api/logout", {}, cookie=cookie)
+        self.assertEqual(status, 200)
+        status, _headers, _body = self.raw("GET", "/api/overview", cookie=cookie)
+        self.assertEqual(status, 401)
+
+    def test_change_password_flow(self):
+        _status, headers, _body = self.login()
+        cookie = (headers.get("set-cookie") or "").split(";")[0]
+        # 另一台设备也登录着，改密后应当被踢掉
+        _status, other_headers, _body = self.login()
+        other = (other_headers.get("set-cookie") or "").split(";")[0]
+
+        status, _headers, body = self.raw("POST", "/api/password", {
+            "old_password": self.PASSWORD, "new_password": "brand-new-pass-2"}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertEqual(self.raw("GET", "/api/overview", cookie=other)[0], 401,
+                         "其他设备应被踢下线")
+        self.assertEqual(self.raw("GET", "/api/overview", cookie=cookie)[0], 200,
+                         "当前设备应保持登录")
+        self.assertEqual(self.login(self.PASSWORD)[0], 401, "旧密码应失效")
+        self.assertEqual(self.login("brand-new-pass-2")[0], 200, "新密码应可用")
+
+    def test_change_password_wrong_old(self):
+        _status, headers, _body = self.login()
+        cookie = (headers.get("set-cookie") or "").split(";")[0]
+        status, _headers, body = self.raw("POST", "/api/password", {
+            "old_password": "nope", "new_password": "brand-new-pass-2"}, cookie=cookie)
+        self.assertEqual(status, 400)
+        self.assertIn("当前密码不正确", json.loads(body)["message"])
+
+    def test_change_password_needs_session(self):
+        status, _headers, _body = self.raw("POST", "/api/password", {
+            "old_password": self.PASSWORD, "new_password": "brand-new-pass-2"})
+        self.assertEqual(status, 401)
 
 
 class OverviewBeforeFirstSampleTest(unittest.TestCase):

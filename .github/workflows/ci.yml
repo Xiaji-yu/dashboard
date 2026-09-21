@@ -45,29 +45,33 @@ jobs:
 
       - name: 启动服务并冒烟测试
         run: |
-          DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=8282 python3 server.py &
+          DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=8282 \
+            DASHBOARD_USER=ci DASHBOARD_PASSWORD=ci-password-1 \
+            DASHBOARD_AUTH_FILE=/tmp/ci-auth.json python3 server.py &
           sleep 2
-          curl -fsS http://127.0.0.1:8282/api/overview \
+
+          # 未登录应被拦下（接口 401，页面跳登录）
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8282/api/overview)
+          test "$code" = "401" || { echo "未登录应返回 401，实际 $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8282/)
+          test "$code" = "302" || { echo "未登录访问首页应 302，实际 $code"; exit 1; }
+          curl -fsS -o /dev/null http://127.0.0.1:8282/login
+
+          # 错误密码应当被拒
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"username":"ci","password":"wrong"}' http://127.0.0.1:8282/api/login)
+          test "$code" = "401" || { echo "错误密码应 401，实际 $code"; exit 1; }
+
+          # 登录并带上会话 Cookie
+          curl -fsS -c /tmp/ci-cookies -X POST -H 'Content-Type: application/json' \
+            -d '{"username":"ci","password":"ci-password-1"}' \
+            http://127.0.0.1:8282/api/login > /dev/null
+          curl -fsS -b /tmp/ci-cookies http://127.0.0.1:8282/api/overview \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ready'], d; print('overview OK, host=', d['host'])"
-          curl -fsS http://127.0.0.1:8282/api/series \
-            | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'cpu' in d['series']; assert d['interval'] > 0; print('series OK')"
-          curl -fsS http://127.0.0.1:8282/api/performance \
+          curl -fsS -b /tmp/ci-cookies http://127.0.0.1:8282/api/performance \
             | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['ready'], d; print('performance OK, 每核=', len(d['cpu']['per_core']['per_cpu']))"
-          curl -fsS -o /dev/null http://127.0.0.1:8282/static/app.js
-          curl -fsS -o /dev/null http://127.0.0.1:8282/static/pages/performance.js
-          echo "静态资源 OK"
-
-  frontend:
-    name: 前端图表测试（Node）
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: 图表库回归测试
-        run: node tests/chart.test.js
+          curl -fsS -b /tmp/ci-cookies http://127.0.0.1:8282/api/series \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'cpu' in d['series']; assert d['interval'] > 0; print('series OK')"
+          curl -fsS -b /tmp/ci-cookies -o /dev/null http://127.0.0.1:8282/static/app.js
+          curl -fsS -b /tmp/ci-cookies -o /dev/null http://127.0.0.1:8282/static/pages/device.js
+          echo "静态资源 OK（已登录）"

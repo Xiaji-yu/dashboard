@@ -93,10 +93,32 @@ function setLive(text, mode) {
   document.getElementById('live-text').textContent = text;
 }
 
-function fetchJSON(url) {
-  return fetch(url, { cache: 'no-store' }).then(function (res) {
+function fetchJSON(url, options) {
+  return fetch(url, Object.assign({ cache: 'no-store' }, options || {})).then(function (res) {
+    if (res.status === 401) {
+      window.location.replace('/login');   // 会话过期：回登录页
+      throw new Error('unauthorized');
+    }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.json();
+  });
+}
+
+/* 表单提交用：返回 {status, data}，401 同样跳登录页 */
+function postJSON(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+    body: JSON.stringify(body || {})
+  }).then(function (res) {
+    if (res.status === 401) {
+      window.location.replace('/login');
+      throw new Error('unauthorized');
+    }
+    return res.json().catch(function () { return {}; }).then(function (data) {
+      return { status: res.status, data: data };
+    });
   });
 }
 
@@ -238,6 +260,85 @@ window.addEventListener('hashchange', navigate);
 navigate();
 setInterval(pollBadges, 2000);
 pollBadges();
+
+/* ---------------- 账号 ---------------- */
+
+(function () {
+  var modal = document.getElementById('account-modal');
+  var message = document.getElementById('account-message');
+
+  function setMessage(text, ok) {
+    message.textContent = text || '';
+    message.classList.toggle('show', Boolean(text));
+    message.style.color = ok ? 'var(--green)' : '';
+  }
+
+  function loadAccount() {
+    fetchJSON('/api/auth').then(function (data) {
+      document.getElementById('account-user').textContent = data.username || '—';
+      document.getElementById('account-state').textContent =
+        data.authenticated ? '已登录' : '未登录';
+    }).catch(function () { /* 401 会由 fetchJSON 跳转 */ });
+  }
+
+  function openAccount() {
+    setMessage('');
+    modal.hidden = false;
+    loadAccount();
+    document.getElementById('account-old').focus();
+  }
+
+  function closeAccount() {
+    modal.hidden = true;
+    setMessage('');
+  }
+
+  document.getElementById('account').addEventListener('click', openAccount);
+  document.getElementById('account-close').addEventListener('click', closeAccount);
+  modal.addEventListener('click', function (event) {
+    if (event.target === modal) closeAccount();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && !modal.hidden) closeAccount();
+  });
+
+  document.getElementById('account-save').addEventListener('click', function () {
+    var oldPass = document.getElementById('account-old').value;
+    var newPass = document.getElementById('account-new').value;
+    var confirm = document.getElementById('account-confirm').value;
+    var newUser = document.getElementById('account-newuser').value.trim();
+    if (!oldPass) return setMessage('修改前请先填写当前密码');
+    if (newPass && newPass !== confirm) return setMessage('两次输入的新密码不一致');
+    setMessage('保存中…', true);
+    postJSON('/api/password', {
+      old_password: oldPass,
+      new_password: newPass || null,
+      new_username: newUser || null
+    }).then(function (result) {
+      setMessage(result.data.message || (result.data.ok ? '已保存' : '保存失败'),
+                 Boolean(result.data.ok));
+      if (result.data.ok) {
+        document.getElementById('account-old').value = '';
+        document.getElementById('account-new').value = '';
+        document.getElementById('account-confirm').value = '';
+        document.getElementById('account-newuser').value = '';
+        loadAccount();
+      }
+    }).catch(function () { setMessage('保存失败，请重试'); });
+  });
+
+  document.getElementById('account-logout').addEventListener('click', function () {
+    postJSON('/api/logout', {}).then(function () {
+      window.location.replace('/login');
+    }).catch(function () { window.location.replace('/login'); });
+  });
+
+  document.getElementById('account-logout-all').addEventListener('click', function () {
+    postJSON('/api/logout', { all: true }).then(function () {
+      window.location.replace('/login');
+    }).catch(function () { window.location.replace('/login'); });
+  });
+})();
 
 document.addEventListener('visibilitychange', function () {
   if (document.hidden || state.paused) return;

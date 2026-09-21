@@ -29,6 +29,13 @@ WorkingDirectory=/home/xiaji/code/dashboard
 Environment=DASHBOARD_HOST=0.0.0.0
 Environment=DASHBOARD_PORT=8282
 Environment=DASHBOARD_INTERVAL=1.0
+# 账号：首次启动会自动生成随机密码并打印到日志（journalctl -u dashboard 查看），
+# 想指定初始账密就打开下面两行（只在凭据文件还不存在时生效）。
+# Environment=DASHBOARD_USER=admin
+# Environment=DASHBOARD_PASSWORD=换成你自己的强密码
+# 凭据文件默认是项目目录下的 auth.json（600 权限，需对服务用户可写）：
+# Environment=DASHBOARD_AUTH_FILE=/home/xiaji/code/dashboard/auth.json
+
 # 需要固定网卡/磁盘时再打开：
 # Environment=DASHBOARD_NIC=enx000ec6c87fb8
 # Environment=DASHBOARD_DISK=/
