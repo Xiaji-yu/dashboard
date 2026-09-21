@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>总控台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand" id="host">总控台</div>
+    <div class="live"><span class="dot" id="live-dot"></span><span id="live-text">实时更新中</span></div>
+
+    <nav class="nav">
+      <a class="nav-item active"><span>概览</span><span class="nav-val" id="nav-temp">—</span></a>
+      <a class="nav-item disabled"><span>性能与电源</span><span class="nav-val" id="nav-cpu">—</span></a>
+      <a class="nav-item disabled"><span>进程</span><span class="nav-val" id="nav-proc">—</span></a>
+      <a class="nav-item disabled"><span>网络与磁盘</span><span class="nav-val" id="nav-net">—</span></a>
+      <a class="nav-item disabled"><span>服务</span><span class="nav-val" id="nav-svc">—</span></a>
+      <a class="nav-item disabled"><span>设备</span><span class="nav-val" id="nav-dev">—</span></a>
+      <a class="nav-item disabled"><span>传感器</span><span class="nav-val" id="nav-sensor">—</span></a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="foot-line">已开机 <span id="uptime" class="mono">—</span></div>
+      <div class="foot-line mono" id="clock">—</div>
+      <button class="side-btn" id="pause">暂停更新</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <section class="upper" id="upper"></section>
+    <section class="lower">
+      <div class="card">
+        <div class="card-head">
+          <span>此刻最忙的程序</span>
+          <span class="head-note" id="proc-note"></span>
+        </div>
+        <div class="card-body" id="procs"></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <span>服务状态</span>
+          <span class="head-note" id="svc-note"></span>
+        </div>
+        <div class="card-body" id="services"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/static/chart.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
