@@ -206,6 +206,16 @@ class HttpApiTest(unittest.TestCase):
                     "started", "cmd", "container"):
             self.assertIn(key, first, key)
 
+    def test_device_contract(self):
+        status, ctype, body = self.request("/api/device")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", ctype)
+        payload = json.loads(body)
+        self.assertTrue(payload["ready"])
+        for key in ("host", "cpu", "memory", "disk", "network", "runtime"):
+            self.assertIn(key, payload, key)
+        self.assertTrue(payload["host"]["hostname"])
+
     def test_services_contract(self):
         status, ctype, body = self.request("/api/services")
         self.assertEqual(status, 200)

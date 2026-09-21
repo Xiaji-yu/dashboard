@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import socket
 import struct
@@ -60,12 +61,59 @@ PROBE_TARGET_INTERVAL = 30.0
 PROBE_TARGET_TIMEOUT = 1.5
 # systemd 服务列表的缓存时间
 SYSTEMD_TTL = 10.0
+# 设备信息（基本不变）的缓存时间；里面要起一次 docker --version
+DEVICE_TTL = 60.0
 
 # 常见代理端口（「本地代理」一行用；8080 太通用，刻意不算）
 PROXY_PORTS = (7890, 7891, 1080, 1081, 8118, 3128, 8889, 7897)
 # 延迟探测：网关试这几个端口取最快的一个；外网目标可用环境变量改
 GATEWAY_PROBE_PORTS = (53, 22, 443, 80)
 NET_PROBE_TARGET = os.environ.get("DASHBOARD_NET_TARGET", "www.baidu.com:443")
+
+
+def parse_os_release(text):
+    """把 /etc/os-release 解析成字典（去掉引号）。"""
+    info = {}
+    for line in (text or "").splitlines():
+        if "=" not in line or line.strip().startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        info[key.strip()] = value.strip().strip('"')
+    return info
+
+
+def parse_cpu_model(text):
+    """从 /proc/cpuinfo 取 CPU 型号。"""
+    for line in (text or "").splitlines():
+        if line.lower().startswith("model name"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def parse_cpu_flags(text):
+    """从 /proc/cpuinfo 取 flags 行，返回集合。"""
+    for line in (text or "").splitlines():
+        low = line.lower()
+        if low.startswith("flags") or low.startswith("features"):
+            return set(line.split(":", 1)[1].split())
+    return set()
+
+
+def virtualization_label(flags):
+    """虚拟化能力：Intel 看 vmx，AMD 看 svm。"""
+    if "vmx" in flags:
+        return "VT-x"
+    if "svm" in flags:
+        return "AMD-V"
+    return None
+
+
+def format_khz(khz):
+    """kHz 文本 -> MHz 整数。"""
+    try:
+        return round(int(khz) / 1000)
+    except (TypeError, ValueError):
+        return None
 
 
 def probes_path():
@@ -278,6 +326,9 @@ class Collector:
         self._systemd_at = 0.0
         self._systemd_lock = threading.Lock()
         self._probes_cache = ([], None, None)
+        self._device = None
+        self._device_at = 0.0
+        self._device_lock = threading.Lock()
         self._gateway = self._read_gateway()
         self._probe = {"gateway_ms": None, "internet_ms": None,
                        "internet_target": NET_PROBE_TARGET, "at": 0.0}
@@ -1002,6 +1053,123 @@ class Collector:
                 out["write_bps"] = round(max(0.0, (counters.write_bytes - prev_write) / delta_t), 1)
         self._disk_io_prev = (now, counters.read_bytes, counters.write_bytes)
         return out
+
+    # ---------------- 设备页：主机 / 处理器 / 内存磁盘 / 网络 / 运行环境 ----------------
+
+    def _cpu_caches(self):
+        """从 sysfs 读各级缓存（免 root、免起 lscpu）。"""
+        rows = []
+        base = "/sys/devices/system/cpu/cpu0/cache"
+        for index in range(5):
+            level = self._read_sys(f"{base}/index{index}/level")
+            kind = self._read_sys(f"{base}/index{index}/type")
+            size = self._read_sys(f"{base}/index{index}/size")
+            if not level or not size:
+                continue
+            rows.append({"level": int(level) if level.isdigit() else level,
+                         "type": (kind or "").lower(), "size": size})
+        return rows
+
+    @staticmethod
+    def _cache_label(item):
+        """L1 分开写数据/指令，L2/L3 是统一缓存。"""
+        if item["level"] == 1:
+            if item["type"].startswith("d"):
+                return "L1d"
+            if item["type"].startswith("i"):
+                return "L1i"
+            return "L1"
+        return f"L{item['level']}"
+
+    @staticmethod
+    def _format_cache_size(text):
+        """'3072K' -> '3 MB'，'32K' -> '32 KB'。"""
+        match = re.fullmatch(r"(\d+)K", (text or "").strip())
+        if not match:
+            return text or ""
+        kb = int(match.group(1))
+        if kb >= 1024:
+            value = kb / 1024
+            return f"{value:.0f} MB" if value == int(value) else f"{value:.1f} MB"
+        return f"{kb} KB"
+
+    @staticmethod
+    def _docker_version():
+        try:
+            done = subprocess.run(["docker", "--version"], capture_output=True,
+                                  text=True, timeout=4, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = (done.stdout or done.stderr or "").strip()
+        match = re.search(r"(\d+\.\d+\.\d+)", text)
+        return match.group(1) if match else (text or None)
+
+    def device_info(self):
+        """设备页信息：基本都是静态的，缓存 60 秒（其中 docker 版本要起子进程）。"""
+        with self._device_lock:
+            now = time.time()
+            if self._device is None or now - self._device_at > DEVICE_TTL:
+                self._device = self._collect_device()
+                self._device_at = now
+            return self._device
+
+    def _collect_device(self):
+        os_release = parse_os_release(self._read_sys("/etc/os-release"))
+        cpuinfo = self._read_sys("/proc/cpuinfo") or ""
+        caches = self._cpu_caches()
+        memory = self._memory()
+        disk = self._disk_static()
+        nic = self._nic_info()
+        battery = self._battery()
+        gpu = self._gpu_freq()
+        max_mhz = format_khz(self._read_sys("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"))
+        min_mhz = format_khz(self._read_sys("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"))
+        uptime = max(0.0, time.time() - self.boot_time)
+        return {
+            "host": {
+                "hostname": socket.gethostname(),
+                "os": os_release.get("PRETTY_NAME") or os_release.get("NAME"),
+                "kernel": platform.release(),
+                "arch": platform.machine(),
+                "uptime_s": round(uptime),
+                "vendor": self._read_sys("/sys/class/dmi/id/sys_vendor"),
+                "product": self._read_sys("/sys/class/dmi/id/product_name"),
+                "board": self._read_sys("/sys/class/dmi/id/board_name"),
+                "bios": self._read_sys("/sys/class/dmi/id/bios_version"),
+            },
+            "cpu": {
+                "model": parse_cpu_model(cpuinfo),
+                "cores": psutil.cpu_count(logical=False),
+                "threads": self.cores,
+                "min_mhz": min_mhz,
+                "max_mhz": max_mhz,
+                "caches": caches,
+                "cache_text": " · ".join(
+                    f"{self._cache_label(item)} {self._format_cache_size(item['size'])}"
+                    for item in caches),
+                "virtualization": virtualization_label(parse_cpu_flags(cpuinfo)),
+                "gpu": gpu if gpu.get("available") else None,
+            },
+            "memory": {"total_gb": memory.get("total_gb"), "swap_gb": memory.get("swap_total_gb")},
+            "disk": {
+                "device": disk.get("device"), "block": disk.get("block"),
+                "model": disk.get("model"), "size_gb": disk.get("size_gb"),
+                "rotational": disk.get("rotational"),
+                "mounts": self._mounts(),
+            },
+            "network": {
+                "name": nic.get("name"), "speed_mbps": nic.get("speed_mbps"),
+                "duplex": nic.get("duplex"), "mac": nic.get("mac"),
+                "ipv4": nic.get("ipv4"), "netmask": nic.get("netmask"),
+                "wireless": nic.get("wireless"),
+            },
+            "runtime": {
+                "python": platform.python_version(),
+                "psutil": psutil.__version__,
+                "docker": self._docker_version(),
+            },
+            "battery": battery if battery.get("available") else None,
+        }
 
     # ---------------- 服务页：端口 / systemd / 容器 / 远程探测 ----------------
 

@@ -19,8 +19,9 @@ import psutil
 
 import collector as collector_module
 from collector import (RAPL_RETRY_SECONDS, Collector, battery_payload, container_id_from_cgroup,
-                       format_sockaddr, is_virtual_nic, is_wireless_nic, listen_ports,
-                       listen_sockets, parse_default_gateway, pick_nic, temp_entry_key)
+                       format_khz, format_sockaddr, is_virtual_nic, is_wireless_nic, listen_ports,
+                       listen_sockets, parse_cpu_flags, parse_cpu_model, parse_default_gateway,
+                       parse_os_release, pick_nic, temp_entry_key, virtualization_label)
 
 PROC_NET_TCP = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 0 12345
@@ -552,6 +553,54 @@ class ProbeTargetsTest(unittest.TestCase):
                 {"name": "B", "host": "2.2.2.2", "port": 22}]}, handle)
         os.utime(self.path, (time.time() + 1, time.time() + 1))
         self.assertEqual(len(self.collector.probe_targets()[0]), 2, "mtime 变了应重载")
+
+
+class DeviceInfoTest(unittest.TestCase):
+    """设备页信息：解析函数 + 真实系统的结构断言。"""
+
+    def test_parse_os_release(self):
+        text = 'NAME="Ubuntu"\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04.5 LTS"\n# 注释\n空行上面\n'
+        info = parse_os_release(text)
+        self.assertEqual(info["NAME"], "Ubuntu")
+        self.assertEqual(info["PRETTY_NAME"], "Ubuntu 24.04.5 LTS")
+
+    def test_parse_cpu_model_and_flags(self):
+        text = ("processor\t: 0\nmodel name\t: Intel(R) Core(TM) i5-7200U CPU @ 2.50GHz\n"
+                "flags\t\t: fpu vme de pse vmx lm\n")
+        self.assertEqual(parse_cpu_model(text), "Intel(R) Core(TM) i5-7200U CPU @ 2.50GHz")
+        flags = parse_cpu_flags(text)
+        self.assertIn("vmx", flags)
+        self.assertEqual(virtualization_label(flags), "VT-x")
+        self.assertEqual(virtualization_label({"svm"}), "AMD-V")
+        self.assertIsNone(virtualization_label(set()))
+        self.assertIsNone(parse_cpu_model(""))
+
+    def test_format_khz(self):
+        self.assertEqual(format_khz("3100000"), 3100)
+        self.assertEqual(format_khz("400000"), 400)
+        self.assertIsNone(format_khz(""))
+        self.assertIsNone(format_khz(None))
+
+    def test_device_info_structure(self):
+        info = Collector().device_info()
+        for key in ("host", "cpu", "memory", "disk", "network", "runtime"):
+            self.assertIn(key, info, key)
+        self.assertEqual(info["host"]["hostname"], socket.gethostname())
+        self.assertTrue(info["host"]["kernel"])
+        self.assertTrue(info["host"]["arch"])
+        self.assertGreater(info["host"]["uptime_s"], 0)
+        self.assertGreater(info["cpu"]["threads"], 0)
+        self.assertTrue(info["cpu"]["model"])
+        self.assertIn("KB", info["cpu"]["cache_text"] + "KB")
+        self.assertGreater(info["memory"]["total_gb"], 0)
+        self.assertTrue(info["runtime"]["python"])
+        self.assertTrue(info["runtime"]["psutil"])
+
+    def test_device_info_is_cached(self):
+        collector = Collector()
+        first = collector.device_info()
+        second = collector.device_info()
+        self.assertIs(first, second, "60 秒缓存内应当是同一份对象")
 
 
 class PowerRaplTest(unittest.TestCase):

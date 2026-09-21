@@ -9,6 +9,7 @@
   GET /api/processes         全部进程（含命令行、用户、容器归属）
   GET /api/network           网络与磁盘：网卡、连接、网关/外网延迟、磁盘容量与读写
   GET /api/services          服务：容器、systemd 服务、监听端口、远程探测延迟
+  GET /api/device            设备：主机、处理器、内存磁盘、网络、运行环境（60 秒缓存）
   GET /api/series?since=TS   曲线数据；省略 since 返回整个时间窗口
   GET /api/series?keys=a,b   只返回指定曲线键（未知键返回 400）
 
@@ -27,6 +28,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import sys
 import socket
 import threading
 import time
@@ -155,6 +157,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_json(self._network())
         if path == "/api/services":
             return self._send_json(self._services())
+        if path == "/api/device":
+            return self._send_json(self._device())
         if path == "/api/series":
             query = parse_qs(parsed.query)
             raw = query.get("since", ["0"])[0]
@@ -206,6 +210,14 @@ class Handler(BaseHTTPRequestHandler):
         payload["ts"] = snapshot["ts"]
         payload["window"] = WINDOW_SECONDS
         payload["interval"] = INTERVAL
+        return payload
+
+    def _device(self):
+        with state_lock:
+            snapshot = state["snapshot"]
+        payload = dict(self.collector.device_info())
+        payload["ready"] = True
+        payload["ts"] = snapshot["ts"] if snapshot else None
         return payload
 
     @staticmethod
@@ -289,7 +301,22 @@ class Handler(BaseHTTPRequestHandler):
         # 默认每条请求都打日志；这里只保留错误，避免刷屏
         status = args[1] if len(args) > 1 else ""
         if str(status).startswith(("4", "5")):
+            # 浏览器自动请求 favicon，没放图标时全是 404，没有诊断价值
+            if "favicon.ico" in self.path:
+                return
             print(f"[http] {self.address_string()} {fmt % args}", flush=True)
+
+
+class DashboardServer(ThreadingHTTPServer):
+    """默认实现会把客户端断连（关标签页、探测浏览器直接断开）打成整段 traceback，
+    这类噪声没有诊断价值，这里吞掉；其他异常照旧打印。"""
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, BrokenPipeError,
+                              ConnectionAbortedError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def create_server(collector, host=HOST, port=PORT):
@@ -299,7 +326,7 @@ def create_server(collector, host=HOST, port=PORT):
     测试里传 port=0 让内核分配空闲端口，避免和在跑的服务抢 8282。
     """
     bound_handler = type("BoundHandler", (Handler,), {"collector": collector})
-    return ThreadingHTTPServer((host, port), bound_handler)
+    return DashboardServer((host, port), bound_handler)
 
 
 def lan_address():
