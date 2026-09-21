@@ -18,7 +18,7 @@
 
   function build(host) {
     var top = document.createElement('section');
-    top.className = 'perf-top';
+    top.className = 'perf-top net-top';
     top.innerHTML =
       '<div class="perf-top-left">' +
         '<div class="card-title"><span class="tick" style="background:#3ddc97"></span>网速</div>' +
@@ -40,7 +40,7 @@
       '</div>';
 
     var cards = document.createElement('section');
-    cards.className = 'perf-bottom';
+    cards.className = 'perf-bottom net-bottom';
     cards.innerHTML =
       '<div class="card">' +
         '<div class="card-head"><span>连接</span>' +
@@ -65,7 +65,7 @@
       '</div>';
 
     var diskCard = document.createElement('section');
-    diskCard.className = 'card';
+    diskCard.className = 'card net-disk-card';
     diskCard.innerHTML =
       '<div class="card-head"><span>磁盘读写</span>' +
       '<span class="head-note" id="diskio-note"></span></div>' +
@@ -74,17 +74,10 @@
         '<div class="mount-rows" id="mount-rows"></div>' +
       '</div>';
 
-    var connCard = document.createElement('section');
-    connCard.className = 'card';
-    connCard.innerHTML =
-      '<div class="card-head"><span>当前连接</span>' +
-      '<span class="head-note" id="remote-note"></span></div>' +
-      '<div class="card-body"><div class="kv-rows" id="remote-rows"></div></div>';
-
+    /* 顺序：网速 → 磁盘读写 → 连接/网卡/磁盘三张卡；整页在一屏内显示 */
     host.appendChild(top);
-    host.appendChild(cards);
     host.appendChild(diskCard);
-    host.appendChild(connCard);
+    host.appendChild(cards);
 
     charts.net = window.createChart(document.getElementById('c-net'), {
       series: [{ key: 'net_down', color: '#3ddc97', fill: false },
@@ -213,26 +206,8 @@
     }).join('');
   }
 
-  function renderRemotes(conn) {
-    var host = document.getElementById('remote-rows');
-    var note = document.getElementById('remote-note');
-    if (!conn || !conn.available) {
-      note.textContent = (conn && conn.reason) || '不可用';
-      host.innerHTML = '';
-      return;
-    }
-    note.textContent = conn.process_attribution
-      ? '按对端聚合'
-      : '按对端聚合 · 非 root 看不到连接所属进程';
-    if (!conn.remotes || !conn.remotes.length) {
-      host.innerHTML = '<div class="empty">当前没有已建立的连接</div>';
-      return;
-    }
-    host.innerHTML = conn.remotes.map(function (item) {
-      return '<div class="kv-row"><span>' + esc(item.addr) + '</span><b>' +
-        item.count + ' 条</b></div>';
-    }).join('');
-  }
+  /* 「当前连接」卡已按要求移除；连接概况保留在「连接」卡的头注（已建立 / 监听）。
+     /api/network 里仍然带 remotes（按对端聚合），留给后续「服务」页用。 */
 
   function renderRates(net) {
     net = net || {};
@@ -249,7 +224,6 @@
     renderConnection(payload.connection, payload.nic);
     renderNic(payload.nic);
     renderDisk(payload.disk);
-    renderRemotes(payload.connection);
   }
 
   /* ---------------- 轮询 ---------------- */
