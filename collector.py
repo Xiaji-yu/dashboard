@@ -1113,62 +1113,182 @@ class Collector:
                 self._device_at = now
             return self._device
 
+    @staticmethod
+    def interface_kind(name):
+        """网卡类型：回环 / 无线 / 虚拟（docker、网桥、veth）/ 有线。"""
+        low = (name or "").lower()
+        if low == "lo":
+            return "回环"
+        if low.startswith("wl"):
+            return "无线"
+        if low.startswith(("docker", "br-", "veth", "virbr", "tun", "tap", "wg", "zt")):
+            return "虚拟"
+        return "有线"
+
+    def _usb_devices(self):
+        """USB 设备：读 sysfs（厂商与型号分字段、免 root）。
+
+        1d6b 是 Linux 基金会的根集线器——那是控制器本身，不是外接设备，标记出来由前端弱化。
+        """
+        rows = []
+        base = "/sys/bus/usb/devices"
+        try:
+            entries = sorted(os.listdir(base))
+        except OSError:
+            entries = []
+        for entry in entries:
+            path = os.path.join(base, entry)
+            vendor_id = self._read_sys(os.path.join(path, "idVendor"))
+            product_id = self._read_sys(os.path.join(path, "idProduct"))
+            if not vendor_id or not product_id:
+                continue
+            bus = self._read_sys(os.path.join(path, "busnum"))
+            device = self._read_sys(os.path.join(path, "devnum"))
+            rows.append({
+                "id": f"{vendor_id}:{product_id}",
+                "vendor": self._read_sys(os.path.join(path, "manufacturer")),
+                "product": self._read_sys(os.path.join(path, "product")),
+                "bus": int(bus) if bus and bus.isdigit() else None,
+                "device": int(device) if device and device.isdigit() else None,
+                "hub": vendor_id.lower() == "1d6b",
+            })
+        rows.sort(key=lambda item: (item["hub"], item["bus"] or 0, item["device"] or 0))
+        return rows
+
+    def _bluetooth(self):
+        """蓝牙：适配器看 /sys/class/bluetooth，已配对设备问 bluetoothctl。"""
+        try:
+            adapters = sorted(os.listdir("/sys/class/bluetooth"))
+        except OSError:
+            adapters = []
+        if not adapters:
+            return {"available": False, "reason": "没有蓝牙适配器",
+                    "adapters": [], "devices": []}
+        devices = []
+        try:
+            done = subprocess.run(["bluetoothctl", "devices"], capture_output=True,
+                                  text=True, timeout=5, check=False)
+            for line in (done.stdout or "").splitlines():
+                fields = line.split(None, 2)
+                if len(fields) >= 2 and fields[0] == "Device":
+                    devices.append({"mac": fields[1],
+                                    "name": fields[2] if len(fields) > 2 else None})
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return {"available": True, "reason": None, "adapters": adapters, "devices": devices}
+
+    def _wireless_info(self, name):
+        """无线网卡的信号与 SSID（没有无线网卡时返回 None）。
+
+        /proc/net/wireless 给链路质量与信号强度（dBm），iwconfig 给 ESSID；
+        以后插上无线网卡，这一页会自动多出带 SSID 与信号的条目。
+        """
+        raw = self._read_sys("/proc/net/wireless")
+        if not raw:
+            return None
+        for line in raw.splitlines():
+            if not line.startswith(name + ":"):
+                continue
+            parts = line.split(":", 1)[1].split()
+            if len(parts) < 3:
+                return None
+
+            def number(text):
+                try:
+                    return round(float(text.rstrip(".")), 1)
+                except ValueError:
+                    return None
+
+            info = {"status": parts[0], "quality": number(parts[1]),
+                    "signal_dbm": number(parts[2]), "ssid": None}
+            try:
+                done = subprocess.run(["iwconfig", name], capture_output=True,
+                                      text=True, timeout=3, check=False)
+                match = re.search(r'ESSID:"([^"]*)"', done.stdout or "")
+                info["ssid"] = match.group(1) if match else None
+            except (OSError, subprocess.SubprocessError):
+                pass
+            return info
+        return None
+
+    def _interfaces(self):
+        """网络接口：物理与无线逐条列，虚拟接口只给数量与名字（docker 一多会淹没页面）。"""
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+        physical, virtual = [], []
+        for name in sorted(stats):
+            kind = self.interface_kind(name)
+            info = {"name": name, "kind": kind, "up": bool(stats[name].isup),
+                    "speed_mbps": stats[name].speed or None, "mtu": stats[name].mtu}
+            for addr in addrs.get(name, []):
+                if addr.family == socket.AF_INET:
+                    info["ipv4"] = addr.address
+                elif addr.family == socket.AF_INET6 and not info.get("ipv6"):
+                    info["ipv6"] = addr.address.split("%")[0]
+                elif addr.family == psutil.AF_LINK:
+                    info["mac"] = addr.address
+            if kind == "无线":
+                info["wireless"] = self._wireless_info(name)
+            (virtual if kind == "虚拟" else physical).append(info)
+        return {"physical": physical, "virtual": virtual}
+
+    @staticmethod
+    def _pci_devices(limit=60):
+        """PCI 设备：lspci 给可读名字（本机 15 个），没有它就只能缺省。"""
+        try:
+            done = subprocess.run(["lspci"], capture_output=True, text=True,
+                                  timeout=5, check=False)
+        except FileNotFoundError:
+            return {"available": False, "reason": "没有 lspci 命令", "list": []}
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"available": False, "reason": f"lspci 调用失败：{exc}", "list": []}
+        rows = [line.strip() for line in (done.stdout or "").splitlines() if line.strip()]
+        return {"available": True, "reason": None, "total": len(rows), "list": rows[:limit]}
+
     def _collect_device(self):
+        """设备页：本机摘要 + 与这台机器连接的设备（USB / 蓝牙 / 网络 / PCI）。"""
         os_release = parse_os_release(self._read_sys("/etc/os-release"))
         cpuinfo = self._read_sys("/proc/cpuinfo") or ""
         caches = self._cpu_caches()
         memory = self._memory()
         disk = self._disk_static()
-        nic = self._nic_info()
         battery = self._battery()
         gpu = self._gpu_freq()
-        max_mhz = format_khz(self._read_sys("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"))
-        min_mhz = format_khz(self._read_sys("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"))
-        uptime = max(0.0, time.time() - self.boot_time)
+        usb = self._usb_devices()
         return {
-            "host": {
+            "summary": {
                 "hostname": socket.gethostname(),
                 "os": os_release.get("PRETTY_NAME") or os_release.get("NAME"),
                 "kernel": platform.release(),
                 "arch": platform.machine(),
-                "uptime_s": round(uptime),
+                "uptime_s": round(max(0.0, time.time() - self.boot_time)),
                 "vendor": self._read_sys("/sys/class/dmi/id/sys_vendor"),
                 "product": self._read_sys("/sys/class/dmi/id/product_name"),
-                "board": self._read_sys("/sys/class/dmi/id/board_name"),
                 "bios": self._read_sys("/sys/class/dmi/id/bios_version"),
-            },
-            "cpu": {
-                "model": parse_cpu_model(cpuinfo),
+                "cpu": parse_cpu_model(cpuinfo),
                 "cores": psutil.cpu_count(logical=False),
                 "threads": self.cores,
-                "min_mhz": min_mhz,
-                "max_mhz": max_mhz,
-                "caches": caches,
                 "cache_text": " · ".join(
                     f"{self._cache_label(item)} {self._format_cache_size(item['size'])}"
                     for item in caches),
                 "virtualization": virtualization_label(parse_cpu_flags(cpuinfo)),
-                "gpu": gpu if gpu.get("available") else None,
-            },
-            "memory": {"total_gb": memory.get("total_gb"), "swap_gb": memory.get("swap_total_gb")},
-            "disk": {
-                "device": disk.get("device"), "block": disk.get("block"),
-                "model": disk.get("model"), "size_gb": disk.get("size_gb"),
-                "rotational": disk.get("rotational"),
+                "memory_gb": memory.get("total_gb"),
+                "swap_gb": memory.get("swap_total_gb"),
+                "gpu": gpu.get("max_mhz") if gpu.get("available") else None,
+                "disk": disk,
                 "mounts": self._mounts(),
             },
-            "network": {
-                "name": nic.get("name"), "speed_mbps": nic.get("speed_mbps"),
-                "duplex": nic.get("duplex"), "mac": nic.get("mac"),
-                "ipv4": nic.get("ipv4"), "netmask": nic.get("netmask"),
-                "wireless": nic.get("wireless"),
-            },
+            "usb": {"list": usb, "total": len(usb),
+                    "external": sum(1 for item in usb if not item["hub"])},
+            "bluetooth": self._bluetooth(),
+            "interfaces": self._interfaces(),
+            "pci": self._pci_devices(),
+            "battery": battery if battery.get("available") else None,
             "runtime": {
                 "python": platform.python_version(),
                 "psutil": psutil.__version__,
                 "docker": self._docker_version(),
             },
-            "battery": battery if battery.get("available") else None,
         }
 
     # ---------------- 服务页：端口 / systemd / 容器 / 远程探测 ----------------

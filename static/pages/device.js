@@ -1,110 +1,212 @@
-/* 设备页：主机 / 处理器 / 内存与磁盘 / 网络与运行环境。
+/* 设备页：与这台机器连接的设备 —— USB、蓝牙、网络接口（含有线/无线）、PCI。
  *
- * 全是静态信息，后端缓存 60 秒；参考图没有这一页，沿用现有卡片视觉语言。
+ * 顶部一行是本机摘要（型号、CPU、内存、磁盘、电池等）。
+ * 蓝牙与无线在没插硬件时如实显示「没有适配器」；以后插上无线网卡，
+ * 「网络接口」会多出带 SSID 与信号强度的条目（数据来自 /proc/net/wireless 与 iwconfig）。
  */
 'use strict';
 
 (function () {
-  var host;
+  function build(host) {
+    var summary = document.createElement('section');
+    summary.className = 'card dev-summary';
+    summary.innerHTML =
+      '<div class="card-head"><span>本机</span>' +
+      '<span class="head-note" id="dev-summary-note"></span></div>' +
+      '<div class="card-body"><div class="dev-chips" id="dev-summary"></div></div>';
 
-  function build(target) {
-    host = target;
     var grid = document.createElement('section');
     grid.className = 'dev-grid';
     grid.innerHTML =
       '<div class="card">' +
-        '<div class="card-head"><span>主机</span><span class="head-note" id="dev-host-note"></span></div>' +
-        '<div class="card-body"><div class="kv-rows" id="dev-host"></div></div>' +
+        '<div class="card-head"><span>USB 设备</span>' +
+        '<span class="head-note" id="dev-usb-note">—</span></div>' +
+        '<div class="card-body"><div class="list-rows" id="dev-usb"></div></div>' +
       '</div>' +
       '<div class="card">' +
-        '<div class="card-head"><span>处理器</span><span class="head-note" id="dev-cpu-note"></span></div>' +
-        '<div class="card-body"><div class="kv-rows" id="dev-cpu"></div></div>' +
+        '<div class="card-head"><span>蓝牙</span>' +
+        '<span class="head-note" id="dev-bt-note">—</span></div>' +
+        '<div class="card-body"><div class="list-rows" id="dev-bt"></div></div>' +
       '</div>' +
       '<div class="card">' +
-        '<div class="card-head"><span>内存与磁盘</span><span class="head-note" id="dev-disk-note"></span></div>' +
-        '<div class="card-body"><div class="kv-rows" id="dev-disk"></div></div>' +
+        '<div class="card-head"><span>网络接口</span>' +
+        '<span class="head-note" id="dev-if-note">—</span></div>' +
+        '<div class="card-body"><div class="list-rows" id="dev-if"></div></div>' +
       '</div>' +
       '<div class="card">' +
-        '<div class="card-head"><span>网络与运行环境</span>' +
-        '<span class="head-note" id="dev-net-note"></span></div>' +
-        '<div class="card-body"><div class="kv-rows" id="dev-net"></div></div>' +
+        '<div class="card-head"><span>PCI 设备</span>' +
+        '<span class="head-note" id="dev-pci-note">—</span></div>' +
+        '<div class="card-body"><div class="list-rows" id="dev-pci"></div></div>' +
       '</div>';
+
+    host.appendChild(summary);
     host.appendChild(grid);
   }
 
-  function kv(label, value) {
-    return '<div class="kv-row"><span>' + esc(label) + '</span><b>' +
-      esc(value === null || value === undefined || value === '' ? '—' : value) + '</b></div>';
+  function chip(label, value) {
+    if (!value) return '';
+    return '<span class="dev-chip"><i>' + esc(label) + '</i>' + esc(value) + '</span>';
   }
 
   function uptimeText(seconds) {
     if (!isFinite(seconds)) return '—';
     var days = Math.floor(seconds / 86400);
     var hours = Math.floor((seconds % 86400) / 3600);
-    var mins = Math.floor((seconds % 3600) / 60);
-    if (days > 0) return days + ' 天 ' + hours + ' 小时';
-    return hours + ' 小时 ' + mins + ' 分钟';
+    return days > 0 ? days + ' 天 ' + hours + ' 小时' : hours + ' 小时';
+  }
+
+  function renderSummary(s) {
+    document.getElementById('dev-summary-note').textContent = s.os || '';
+    var disk = s.disk || {};
+    var mounts = (s.mounts || []).map(function (item) {
+      return item.device + ' ' + item.fstype + ' → ' + item.mount +
+        '（已用 ' + item.used_percent + '%）';
+    }).join('；');
+    document.getElementById('dev-summary').innerHTML = [
+      chip('主机名', s.hostname),
+      chip('系统', s.os),
+      chip('内核', s.kernel + ' · ' + s.arch),
+      chip('机型', [s.vendor, s.product].filter(Boolean).join(' ')),
+      chip('BIOS', s.bios),
+      chip('CPU', s.cpu),
+      chip('核心', s.cores + ' 核 ' + s.threads + ' 线程' + (s.cache_text ? ' · ' + s.cache_text : '')),
+      chip('虚拟化', s.virtualization),
+      chip('内存', s.memory_gb ? s.memory_gb + ' GB（交换 ' + s.swap_gb + ' GB）' : null),
+      chip('核显', s.gpu ? '最大 ' + s.gpu + ' MHz' : null),
+      chip('磁盘', [disk.model, disk.size_gb ? disk.size_gb + ' GB' : null,
+                    disk.rotational === null || disk.rotational === undefined
+                      ? null : (disk.rotational ? '机械硬盘' : '固态硬盘')]
+                     .filter(Boolean).join(' · ')),
+      chip('分区', mounts),
+      chip('已运行', uptimeText(s.uptime_s))
+    ].join('');
+  }
+
+  function renderUsb(usb) {
+    var host = document.getElementById('dev-usb');
+    var note = document.getElementById('dev-usb-note');
+    var list = (usb && usb.list) || [];
+    if (!list.length) {
+      note.textContent = '未检测到';
+      host.innerHTML = '<div class="empty">没有读到 USB 设备</div>';
+      return;
+    }
+    note.textContent = usb.total + ' 个 · 外接 ' + usb.external;
+    host.innerHTML = list.map(function (item) {
+      return '<div class="usb-row' + (item.hub ? ' hub' : '') + '">' +
+        '<span class="usb-badge">' + (item.hub ? '控制器' : '外接') + '</span>' +
+        '<span class="usb-name">' + esc(item.product || '未知设备') + '</span>' +
+        '<span class="usb-vendor">' + esc(item.vendor || '') + '</span>' +
+        '<span class="usb-id">' + esc(item.id) + '</span>' +
+        '<span class="usb-port">bus ' + (item.bus || '?') + ' · 端口 ' + (item.device || '?') + '</span>' +
+        '</div>';
+    }).join('');
+  }
+
+  function renderBluetooth(bt) {
+    var host = document.getElementById('dev-bt');
+    var note = document.getElementById('dev-bt-note');
+    if (!bt || !bt.available) {
+      note.textContent = '无适配器';
+      host.innerHTML = '<div class="empty">' + esc((bt && bt.reason) || '没有蓝牙适配器') +
+        '<br><span class="dim">插上蓝牙适配器后会自动出现在这里</span></div>';
+      return;
+    }
+    note.textContent = bt.adapters.length + ' 个适配器 · ' + bt.devices.length + ' 个设备';
+    var rows = bt.adapters.map(function (name) {
+      return '<div class="bt-row">' +
+        '<span class="usb-badge">适配器</span>' +
+        '<span class="bt-name">' + esc(name) + '</span>' +
+        '<span class="usb-vendor">' + (bt.devices.length ? '' : '暂无已配对设备') + '</span>' +
+        '</div>';
+    });
+    rows = rows.concat(bt.devices.map(function (item) {
+      return '<div class="bt-row">' +
+        '<span class="usb-badge">设备</span>' +
+        '<span class="bt-name">' + esc(item.name || item.mac) + '</span>' +
+        '<span class="usb-vendor">' + esc(item.mac) + '</span>' +
+        '</div>';
+    }));
+    host.innerHTML = rows.join('') || '<div class="empty">没有蓝牙设备</div>';
+  }
+
+  function renderInterfaces(interfaces) {
+    var host = document.getElementById('dev-if');
+    var note = document.getElementById('dev-if-note');
+    var physical = (interfaces && interfaces.physical) || [];
+    var virtual = (interfaces && interfaces.virtual) || [];
+    if (!physical.length && !virtual.length) {
+      note.textContent = '未检测到';
+      host.innerHTML = '<div class="empty">没有网络接口</div>';
+      return;
+    }
+    note.textContent = physical.length + ' 个物理/无线 · ' + virtual.length + ' 个虚拟';
+    var rows = physical.map(function (item) {
+      var detail = [];
+      if (item.speed_mbps) detail.push(item.speed_mbps + ' Mbps');
+      if (item.mtu) detail.push('MTU ' + item.mtu);
+      if (item.ipv4) detail.push(item.ipv4);
+      if (item.mac) detail.push(item.mac);
+      var wireless = item.wireless;
+      if (wireless) {
+        if (wireless.ssid) detail.push('SSID ' + wireless.ssid);
+        if (wireless.signal_dbm !== null && wireless.signal_dbm !== undefined) {
+          detail.push('信号 ' + wireless.signal_dbm + ' dBm');
+        }
+      }
+      return '<div class="iface-row">' +
+        '<span class="iface-kind ' + (item.kind === '无线' ? 'wifi' : '') + '">' +
+          esc(item.kind) + '</span>' +
+        '<span class="iface-name">' + esc(item.name) + '</span>' +
+        '<span class="iface-state ' + (item.up ? 'up' : 'down') + '">' +
+          (item.up ? '已连接' : '未连接') + '</span>' +
+        '<span class="iface-detail">' + esc(detail.join(' · ')) + '</span>' +
+        '</div>';
+    });
+    if (virtual.length) {
+      rows.push('<div class="iface-row virtual">' +
+        '<span class="iface-kind">虚拟</span>' +
+        '<span class="iface-name">' + virtual.length + ' 个接口</span>' +
+        '<span class="iface-state">—</span>' +
+        '<span class="iface-detail">' + esc(virtual.slice(0, 4).map(function (item) {
+          return item.name;
+        }).join(' · ') + (virtual.length > 4 ? ' …' : '')) + '</span>' +
+        '</div>');
+    }
+    host.innerHTML = rows.join('');
+  }
+
+  function renderPci(pci) {
+    var host = document.getElementById('dev-pci');
+    var note = document.getElementById('dev-pci-note');
+    if (!pci || !pci.available) {
+      note.textContent = '不可用';
+      host.innerHTML = '<div class="empty">' + esc((pci && pci.reason) || '读不到 PCI 设备') + '</div>';
+      return;
+    }
+    note.textContent = pci.total + ' 个';
+    host.innerHTML = pci.list.map(function (line) {
+      var parts = line.split(' ');
+      var slot = parts.shift();
+      return '<div class="pci-row">' +
+        '<span class="pci-slot">' + esc(slot) + '</span>' +
+        '<span class="pci-name">' + esc(parts.join(' ')) + '</span>' +
+        '</div>';
+    }).join('');
   }
 
   function render(payload) {
-    var h = payload.host || {};
-    var c = payload.cpu || {};
-    var m = payload.memory || {};
-    var d = payload.disk || {};
-    var n = payload.network || {};
-    var r = payload.runtime || {};
+    renderSummary(payload.summary || {});
+    renderUsb(payload.usb || {});
+    renderBluetooth(payload.bluetooth || {});
+    renderInterfaces(payload.interfaces || {});
+    renderPci(payload.pci || {});
     var battery = payload.battery;
-
-    document.getElementById('dev-host-note').textContent = h.os || '';
-    document.getElementById('dev-host').innerHTML = [
-      kv('主机名', h.hostname),
-      kv('操作系统', h.os),
-      kv('内核', h.kernel),
-      kv('架构', h.arch),
-      kv('已运行', uptimeText(h.uptime_s)),
-      kv('厂商与型号', [h.vendor, h.product].filter(Boolean).join(' ')),
-      kv('主板', h.board),
-      kv('BIOS', h.bios)
-    ].join('');
-
-    document.getElementById('dev-cpu-note').textContent = c.model || '';
-    var freq = (c.min_mhz && c.max_mhz) ? c.min_mhz + ' – ' + c.max_mhz + ' MHz' : null;
-    document.getElementById('dev-cpu').innerHTML = [
-      kv('核心与线程', c.cores ? c.cores + ' 核 ' + c.threads + ' 线程' : null),
-      kv('频率范围', freq),
-      kv('缓存', c.cache_text),
-      kv('虚拟化', c.virtualization),
-      kv('核显', c.gpu ? ('Intel 核显 · 当前 ' + c.gpu.freq_mhz + ' / 最大 ' +
-        (c.gpu.max_mhz || '—') + ' MHz') : null)
-    ].join('');
-
-    document.getElementById('dev-disk-note').textContent = d.block || '';
-    document.getElementById('dev-disk').innerHTML = [
-      kv('内存', m.total_gb ? m.total_gb + ' GB' : null),
-      kv('交换区', m.swap_gb ? m.swap_gb + ' GB' : null),
-      kv('磁盘', [d.model, d.size_gb ? d.size_gb + ' GB' : null,
-                  d.rotational === null || d.rotational === undefined
-                    ? null : (d.rotational ? '机械硬盘' : '固态硬盘')]
-                 .filter(Boolean).join(' · ')),
-      kv('分区', (d.mounts || []).map(function (item) {
-        return item.device + ' ' + item.fstype + ' → ' + item.mount +
-          '（' + item.total_gb + ' GB，已用 ' + item.used_percent + '%）';
-      }).join('；'))
-    ].join('');
-
-    document.getElementById('dev-net-note').textContent = n.wireless ? '无线网卡' : '有线网卡';
-    document.getElementById('dev-net').innerHTML = [
-      kv('网卡', n.name),
-      kv('链路', n.speed_mbps ? (n.speed_mbps + ' Mbps ' + (n.duplex || '')) : null),
-      kv('MAC', n.mac),
-      kv('IPv4', n.ipv4 ? n.ipv4 + (n.netmask ? '/' + n.netmask : '') : null),
-      kv('Python / psutil', [r.python, r.psutil].filter(Boolean).join(' / ')),
-      kv('Docker', r.docker),
-      kv('电池', battery ? (battery.percent.toFixed(1) + '% · ' +
-        ({ 'Charging': '充电中', 'Discharging': '放电中',
-           'Not charging': '接通电源·未充电', 'Full': '已充满' }[battery.status] || '') +
-        (battery.cycles ? ' · 循环 ' + battery.cycles + ' 次' : '')) : null)
-    ].join('');
+    if (battery) {
+      document.getElementById('dev-summary').insertAdjacentHTML('beforeend',
+        chip('电池', battery.percent.toFixed(1) + '%' +
+          (battery.cycles ? ' · 循环 ' + battery.cycles + ' 次' : '')));
+    }
   }
 
   function tick() {
@@ -123,7 +225,7 @@
   DashPages.device = {
     title: '设备',
     interval: 30000,
-    mount: function (target) { build(target); },
+    mount: function (host) { build(host); },
     tick: tick,
     render: render
   };

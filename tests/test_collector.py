@@ -583,18 +583,108 @@ class DeviceInfoTest(unittest.TestCase):
 
     def test_device_info_structure(self):
         info = Collector().device_info()
-        for key in ("host", "cpu", "memory", "disk", "network", "runtime"):
+        for key in ("summary", "usb", "bluetooth", "interfaces", "pci", "runtime"):
             self.assertIn(key, info, key)
-        self.assertEqual(info["host"]["hostname"], socket.gethostname())
-        self.assertTrue(info["host"]["kernel"])
-        self.assertTrue(info["host"]["arch"])
-        self.assertGreater(info["host"]["uptime_s"], 0)
-        self.assertGreater(info["cpu"]["threads"], 0)
-        self.assertTrue(info["cpu"]["model"])
-        self.assertIn("KB", info["cpu"]["cache_text"] + "KB")
-        self.assertGreater(info["memory"]["total_gb"], 0)
+        summary = info["summary"]
+        self.assertEqual(summary["hostname"], socket.gethostname())
+        self.assertTrue(summary["kernel"])
+        self.assertTrue(summary["arch"])
+        self.assertGreater(summary["uptime_s"], 0)
+        self.assertGreater(summary["threads"], 0)
+        self.assertTrue(summary["cpu"])
+        self.assertGreater(summary["memory_gb"], 0)
+        # USB：本机至少有根集线器
+        self.assertTrue(info["usb"]["list"])
+        self.assertLessEqual(info["usb"]["external"], info["usb"]["total"])
+        # 网络：至少回环
+        self.assertTrue(info["interfaces"]["physical"])
+        # PCI：有 lspci 时应当有内容
+        if info["pci"]["available"]:
+            self.assertTrue(info["pci"]["list"])
         self.assertTrue(info["runtime"]["python"])
-        self.assertTrue(info["runtime"]["psutil"])
+
+    def test_interface_kind(self):
+        cases = {"lo": "回环", "wlan0": "无线", "wlx00c0ca123456": "无线",
+                 "docker0": "虚拟", "br-18e01ed58ac0": "虚拟", "veth02a10c5": "虚拟",
+                 "eth0": "有线", "enx000ec6c87fb8": "有线"}
+        for name, kind in cases.items():
+            self.assertEqual(Collector.interface_kind(name), kind, name)
+
+
+    def test_usb_devices_flags_root_hubs(self):
+        """1d6b 是根集线器（控制器），要和外接设备区分开。"""
+        collector = Collector.__new__(Collector)
+        values = {
+            "/sys/bus/usb/devices/1-1/idVendor": "0b95",
+            "/sys/bus/usb/devices/1-1/idProduct": "772a",
+            "/sys/bus/usb/devices/1-1/manufacturer": "ASIX Elec. Corp.",
+            "/sys/bus/usb/devices/1-1/product": "AX88772A",
+            "/sys/bus/usb/devices/1-1/busnum": "1",
+            "/sys/bus/usb/devices/1-1/devnum": "2",
+            "/sys/bus/usb/devices/usb1/idVendor": "1d6b",
+            "/sys/bus/usb/devices/usb1/idProduct": "0002",
+            "/sys/bus/usb/devices/usb1/product": "xHCI Host Controller",
+            "/sys/bus/usb/devices/usb1/busnum": "1",
+            "/sys/bus/usb/devices/usb1/devnum": "1",
+        }
+        with mock.patch("os.listdir", return_value=["1-1", "usb1"]), \
+                mock.patch.object(Collector, "_read_sys", side_effect=values.get):
+            rows = collector._usb_devices()
+        self.assertEqual(len(rows), 2)
+        self.assertFalse(rows[0]["hub"], "外接设备排在前面")
+        self.assertEqual(rows[0]["id"], "0b95:772a")
+        self.assertEqual(rows[0]["product"], "AX88772A")
+        self.assertTrue(rows[1]["hub"])
+
+    def test_wireless_info_without_nic(self):
+        collector = Collector.__new__(Collector)
+        with mock.patch.object(Collector, "_read_sys", return_value=None):
+            self.assertIsNone(collector._wireless_info("wlan0"))
+
+    def test_wireless_info_parses_signal_and_ssid(self):
+        collector = Collector.__new__(Collector)
+        proc = ("Inter-| sta-|   Quality        |   Discarded packets\n"
+                " face | tus | link level noise |  nwid  crypt   frag  retry\n"
+                "wlan0: 0000   55.  -55.  -256        0      0      0      0\n")
+        done = mock.Mock(returncode=0, stdout='wlan0     IEEE 802.11  ESSID:"MyWiFi"\n', stderr="")
+        with mock.patch.object(Collector, "_read_sys", return_value=proc), \
+                mock.patch("collector.subprocess.run", return_value=done):
+            info = collector._wireless_info("wlan0")
+        self.assertEqual(info["ssid"], "MyWiFi")
+        self.assertEqual(info["signal_dbm"], -55.0)
+        self.assertEqual(info["quality"], 55.0)
+
+    def test_pci_devices_parsing(self):
+        output = ("00:02.0 VGA compatible controller: Intel Corporation HD Graphics 620 (rev 02)\n"
+                  "00:14.0 USB controller: Intel Corporation Sunrise Point-LP USB 3.0 xHCI Controller\n")
+        done = mock.Mock(returncode=0, stdout=output, stderr="")
+        with mock.patch("collector.subprocess.run", return_value=done):
+            result = Collector._pci_devices()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["total"], 2)
+        self.assertTrue(result["list"][0].startswith("00:02.0 VGA"))
+        with mock.patch("collector.subprocess.run", side_effect=FileNotFoundError):
+            missing = Collector._pci_devices()
+        self.assertFalse(missing["available"])
+        self.assertIn("lspci", missing["reason"])
+
+    def test_bluetooth_without_adapter(self):
+        collector = Collector.__new__(Collector)
+        with mock.patch("os.listdir", side_effect=OSError):
+            result = collector._bluetooth()
+        self.assertFalse(result["available"])
+        self.assertIn("适配器", result["reason"])
+
+    def test_bluetooth_lists_devices(self):
+        collector = Collector.__new__(Collector)
+        done = mock.Mock(returncode=0,
+                         stdout="Device AA:BB:CC:DD:EE:FF 键鼠套装\n", stderr="")
+        with mock.patch("os.listdir", return_value=["hci0"]), \
+                mock.patch("collector.subprocess.run", return_value=done):
+            result = collector._bluetooth()
+        self.assertTrue(result["available"])
+        self.assertEqual(result["adapters"], ["hci0"])
+        self.assertEqual(result["devices"][0]["name"], "键鼠套装")
 
     def test_device_info_is_cached(self):
         collector = Collector()

@@ -1208,11 +1208,23 @@ body {
     min-height: 0;
     overflow: hidden;
   }
+
+  .dev-summary { flex: none; }
+  .dev-grid { flex: 1 1 0; min-height: 0; }
 }
 
+/* 顶部本机摘要：一行挤不下的信息用 chip 换行铺开 */
+.dev-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 12px;
+}
+
+.dev-chip { display: inline-flex; align-items: baseline; gap: 6px; }
+.dev-chip i { color: var(--dim); font-style: normal; }
+
 .dev-grid {
-  flex: 1 1 0;
-  min-height: 0;
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
@@ -1220,100 +1232,116 @@ body {
 }
 
 .dev-grid .card { min-height: 0; }
-.dev-grid .card-body { overflow: auto; }
-.dev-grid .kv-row > b { max-width: 62%; text-align: right; word-break: break-word; }
+.dev-grid .card-body { display: flex; flex-direction: column; }
+.list-rows { flex: 1 1 auto; min-height: 0; overflow: auto; }
 
-@media (max-width: 900px) {
-  .dev-grid { grid-template-columns: 1fr; grid-template-rows: none; }
-}
-
-/* ---------------- 传感器页 ---------------- */
-
-@media (min-width: 901px) {
-  body[data-page="sensors"] .app {
-    height: 100vh;
-    min-height: 0;
-    overflow: hidden;
-  }
-
-  .sensor-top { height: 42vh; min-height: 210px; }
-  .sensor-bottom { flex: 1 1 0; min-height: 0; }
-}
-
-.sensor-top {
+/* USB / 蓝牙 */
+.usb-row, .bt-row {
   display: grid;
-  grid-template-columns: 1.25fr 1fr;
-  grid-template-rows: minmax(0, 1fr);
-  gap: 14px;
-}
-
-.sensor-top .card, .sensor-bottom { min-height: 0; }
-.sensor-top .card-body, .sensor-bottom .card-body { display: flex; flex-direction: column; }
-
-.temp-rows, .core-rows { flex: 1 1 auto; min-height: 0; overflow: auto; }
-
-.temp-row, .core-row {
-  display: flex;
+  grid-template-columns: 58px minmax(0, 1.4fr) minmax(0, 1fr) 76px 92px;
+  gap: 8px;
   align-items: center;
-  gap: 10px;
   padding: 5px 0;
   border-bottom: 1px dashed var(--line-soft);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
-.temp-row:last-child, .core-row:last-child { border-bottom: none; }
+.bt-row { grid-template-columns: 58px minmax(0, 1.4fr) minmax(0, 1fr); }
+.usb-row.hub { color: var(--dim); }
 
-.temp-row .name, .core-row .name {
-  flex: 0 0 96px;
+.usb-badge {
+  font-size: 10.5px;
+  text-align: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 5px;
+  padding: 1px 0;
+}
+
+.usb-row.hub .usb-badge { color: var(--dim); background: rgba(255, 255, 255, 0.03); }
+
+.usb-name, .bt-name, .usb-vendor {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usb-vendor { color: var(--muted); font-size: 11.5px; }
+
+.usb-id, .usb-port {
+  color: var(--dim);
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 网络接口 */
+.iface-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1.1fr) 54px minmax(0, 1.6fr);
+  gap: 8px;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  font-size: 12px;
+}
+
+.iface-row.virtual { color: var(--dim); }
+
+.iface-kind {
+  font-size: 10.5px;
+  text-align: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 5px;
+  padding: 1px 0;
+}
+
+.iface-kind.wifi { color: var(--blue); background: rgba(79, 195, 247, 0.14); }
+.iface-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.iface-state { font-size: 11px; color: var(--green); }
+.iface-state.down { color: var(--dim); }
+
+.iface-detail {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* PCI */
+.pci-row {
+  display: flex;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--line-soft);
+  font-size: 12px;
+}
+
+.pci-slot { flex: 0 0 66px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+.pci-name {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.temp-row .meter, .core-row .meter {
-  flex: 1 1 auto;
-  height: 6px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-}
-
-.temp-row .meter i, .core-row .meter i {
-  display: block;
-  height: 100%;
-  width: 0;
-  border-radius: 3px;
-  transition: width 0.45s ease;
-}
-
-.temp-row .value, .core-row .pct {
-  flex: 0 0 62px;
-  text-align: right;
-  font-weight: 400;
-  font-variant-numeric: tabular-nums;
-}
-
-.core-row .freq {
-  flex: 0 0 74px;
-  text-align: right;
-  color: var(--dim);
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
-}
-
-.sensor-top .mini-chart { flex: 1 1 auto; min-height: 40px; margin-top: 8px; }
-.core-chart { flex: 0 0 150px; min-height: 90px; margin-top: 8px; }
+.empty .dim { color: var(--dim); }
 
 @media (max-width: 900px) {
-  .sensor-top { grid-template-columns: 1fr; height: auto; }
-  .temp-rows, .core-rows { overflow: visible; }
-  .sensor-top .mini-chart { flex: none; height: 60px; }
-  .core-chart { flex: none; height: 110px; }
+  .dev-grid { grid-template-columns: 1fr; grid-template-rows: none; }
+  .list-rows { overflow: visible; }
+  .usb-row { grid-template-columns: 54px minmax(0, 1fr) 74px; }
+  .usb-vendor, .usb-port { display: none; }
+  .iface-row { grid-template-columns: 46px minmax(0, 1fr) 54px; }
+  .iface-detail { display: none; }
 }
 
 @media (min-width: 901px) and (max-height: 730px) {
-  .sensor-top { height: 36vh; min-height: 170px; }
-  .temp-row, .core-row { font-size: 11.5px; padding: 3px 0; }
-  .core-chart { flex: 0 0 110px; }
+  .dev-chips { font-size: 11.5px; gap: 2px 14px; }
+  .usb-row, .bt-row, .iface-row, .pci-row { font-size: 11.5px; padding: 3px 0; }
 }

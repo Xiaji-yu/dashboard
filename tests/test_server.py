@@ -212,9 +212,10 @@ class HttpApiTest(unittest.TestCase):
         self.assertIn("application/json", ctype)
         payload = json.loads(body)
         self.assertTrue(payload["ready"])
-        for key in ("host", "cpu", "memory", "disk", "network", "runtime"):
+        for key in ("summary", "usb", "bluetooth", "interfaces", "pci", "runtime"):
             self.assertIn(key, payload, key)
-        self.assertTrue(payload["host"]["hostname"])
+        self.assertTrue(payload["summary"]["hostname"])
+        self.assertIn("list", payload["usb"])
 
     def test_services_contract(self):
         status, ctype, body = self.request("/api/services")

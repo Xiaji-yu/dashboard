@@ -14,8 +14,7 @@ var PAGE_TITLES = {
   processes: '进程',
   network: '网络与磁盘',
   services: '服务',
-  device: '设备',
-  sensors: '传感器'
+  device: '设备'
 };
 
 var state = { paused: false, tick: 0, page: null, pageTimer: null };
@@ -113,7 +112,6 @@ function pollGuard() {
 function updateBadges(ov) {
   var temp = ov.temp, cpu = ov.cpu, net = ov.net, disk = ov.disk;
   setNav('nav-temp', temp && temp.available ? temp.celsius.toFixed(0) + '°C' : '—');
-  setNav('nav-sensor', temp && temp.available ? temp.celsius.toFixed(0) + '°' : '—');
   setNav('nav-cpu', cpu && cpu.available ? cpu.percent.toFixed(0) + '%' : '—');
   setNav('nav-proc', ov.process_count || 0);
   setNav('nav-net', net && net.available ? '↓ ' + fmtRate(net.down_bps) : '—');
