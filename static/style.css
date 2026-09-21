@@ -528,8 +528,18 @@ body {
   }
 
   /* 大卡的曲线区靠 height:100% 撑开，父容器必须有确定高度；
-     桌面端父容器是自然高度，所以这里用视口高度作参照（手机端另有固定高度）。 */
-  .perf-top { height: 58vh; min-height: 390px; }
+     桌面端父容器是自然高度，所以这里用视口高度作参照（手机端另有固定高度）。
+     46vh：比原先的 58vh 矮一些，好和下面三张卡一起放进一屏，又不至于让卡片拉伸留出大片空白。 */
+  .perf-top { flex: 0 1 auto; height: 46vh; min-height: 300px; }
+
+  /* 性能页也做成一屏：三张卡吃掉剩余高度，内容超出时卡片内部滚动 */
+  body[data-page="performance"] .app {
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .perf-bottom { flex: 1 1 auto; min-height: 0; }
 }
 
 /* ---- 上半部分：一张大卡（左列数值 + 右侧大曲线） ---- */
@@ -933,3 +943,9 @@ body {
   .net-block .big-value { font-size: 24px; }
   .disk-chart { height: 110px; }
 }
+
+/* 一屏布局下三张卡会略高于内容：温度/风扇两张小曲线吃掉余量，内存卡上下分匀，
+   避免卡片底部留一大片空白 */
+.perf-bottom .card-body { display: flex; flex-direction: column; }
+.perf-bottom .mini-chart { flex: 1 1 auto; min-height: 46px; }
+.perf-bottom .card:nth-child(3) .card-body { justify-content: space-between; }
