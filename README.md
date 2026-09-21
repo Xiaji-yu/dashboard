@@ -161,6 +161,10 @@ DASHBOARD_PORT=9000 DASHBOARD_HOST=127.0.0.1 ./run.sh start
 
 ## 接口
 
+**完整的字段级 API 文档见 [`docs/API.md`](docs/API.md)**（含每个接口的字段表、单位、降级语义，
+以及给 Bot / 脚本用的取数配方）。该文档由 `tools/gen_api_doc.py` 从真实响应生成，
+`tests/test_api_docs.py` 会校验文档与实现不漂移。
+
 除了登录相关接口，**其余接口都需要先登录**（未登录时接口返回 401，页面跳转登录页）。
 
 | 接口 | 说明 |
@@ -346,6 +350,7 @@ dashboard/
 ├── probes.json            # 服务页的远程探测目标（可改，改完不用重启）
 ├── tests/                 # Python 用例 + chart.test.js（Node 前端图表用例）
 ├── deploy/                # systemd 服务单元与 RAPL 权限 udev 规则
+├── tools/               # gen_api_doc.py：从真实响应生成 docs/API.md
 ├── docs/
 │   ├── screenshot.png     # 本项目运行截图
 │   └── reference/         # UI 参考图（见该目录 README）
