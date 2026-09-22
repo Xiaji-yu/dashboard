@@ -6,6 +6,7 @@
 
 import base64
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -161,6 +162,37 @@ class WindowsRealDataTest(unittest.TestCase):
         self.assertEqual(rows[0]["bus"], "SCSI")
         explicit = disk_rows_from_wmi([{"Model": "X", "MediaType": "SSD"}])
         self.assertFalse(explicit[0]["rotational"], "明确写 SSD 时才敢下结论")
+
+
+class PowerShellScriptEncodingTest(unittest.TestCase):
+    """中文 Windows 的 PowerShell 5.1 会按 ANSI(GBK) 解码没有 BOM 的 .ps1。
+
+    实测后果：UTF-8 中文按 GBK 配对时把后面的引号/花括号当成尾字节吃掉，
+    字符串永不闭合，解析器在几十行之后报「意外的标记 {」——排查成本极高。
+    因此 .ps1 必须带 UTF-8 BOM，这里守住它。
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    SCRIPTS = ("run.ps1", os.path.join("deploy", "install-windows.ps1"))
+    # 每个脚本里的一个特征串，确认解码后内容完整（不是乱码）
+    MARKERS = {"run.ps1": "$Action", "install-windows.ps1": "-Remove"}
+
+    def test_scripts_have_utf8_bom(self):
+        for name in self.SCRIPTS:
+            path = os.path.join(self.ROOT, name)
+            with open(path, "rb") as handle:
+                head = handle.read(3)
+            self.assertEqual(head, b"\xef\xbb\xbf",
+                             f"{name} 必须带 UTF-8 BOM，否则中文 Windows 上 PS 5.1 会解析失败")
+
+    def test_scripts_decode_as_utf8(self):
+        for name in self.SCRIPTS:
+            path = os.path.join(self.ROOT, name)
+            with open(path, "rb") as handle:
+                text = handle.read().decode("utf-8-sig")
+            self.assertIn(self.MARKERS[os.path.basename(name)], text, name)
+            self.assertIn("param(", text, name)
+            self.assertTrue(text.endswith("\n"), f"{name} 结尾应有换行")
 
 
 class PowershellEncodingTest(unittest.TestCase):

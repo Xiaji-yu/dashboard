@@ -5,6 +5,29 @@ Windows 上原样可用**；Linux 专有接口（`/proc`、`/sys`、`systemctl`�
 `platform_win.py` 里用 **PowerShell(ConvertTo-Json) + netsh + arp** 做了等价替换。
 前端零改动——同一套载荷结构。
 
+## ⚠️ 中文 Windows 上必须用带 BOM 的脚本（已内置修复）
+
+`run.ps1` 与 `deploy/install-windows.ps1` **必须保持 UTF-8 with BOM**。
+
+原因：中文 Windows 的 **PowerShell 5.1 会按系统 ANSI 代码页（GBK）解码没有 BOM 的 .ps1 文件**。
+UTF-8 中文的字节被当成 GBK 配对时会**吃掉后面的 ASCII 字符**（引号、花括号被当作 GBK 尾字节），
+于是字符串永不闭合，解析器在几十行之后才报一个看起来毫不相干的语法错：
+
+```
+所在位置 run.ps1:99 字符: 10
++     "fg" {
++          ~
+表达式或语句中包含意外的标记“{”。
+```
+
+仓库里的两个 .ps1 已带 BOM，并有回归测试守着（`tests/test_windows_port.py`）。
+**用编辑器另存时请选「UTF-8 with BOM」**（VS Code 右下角编码 → Save with Encoding → UTF-8 with BOM）。
+如果只是想让服务跑起来，也可以直接绕过脚本：
+
+```powershell
+python server.py          # 等价于 .\run.ps1 fg
+```
+
 ## 装机
 
 ```powershell

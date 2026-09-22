@@ -1,4 +1,4 @@
-# 8282 总控台 —— Windows 启动脚本
+﻿# 8282 总控台 —— Windows 启动脚本
 #
 # 用法（PowerShell）：
 #   .\run.ps1 start      启动（后台，日志写 server.log）
@@ -9,6 +9,11 @@
 #   .\run.ps1 fg         前台运行（Ctrl+C 结束，适合先跑起来看看）
 #
 # 需要 Python 3.9+ 和 psutil：  python -m pip install psutil
+#
+# 注意：本文件必须保持 **UTF-8 with BOM**。
+# 中文 Windows 上的 PowerShell 5.1 会按系统 ANSI(GBK) 解码没有 BOM 的 .ps1，
+# 中文的 UTF-8 字节被当成 GBK 配对时会吃掉后面的引号/花括号，导致莫名其妙的语法错误。
+# 用编辑器另存时请选「UTF-8 with BOM」(VS Code: UTF-8 with BOM)。
 # 生产环境建议装成 Windows 服务，见 deploy\install-windows.ps1
 
 param(
