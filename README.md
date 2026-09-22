@@ -36,6 +36,10 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 - **只读 API Token**：给 Bot / 脚本用的机器凭据。页面「账号」里创建（**完整令牌只显示一次**），
   用 `Authorization: Bearer <token>` 或 `?token=<token>` 携带；**只能访问 GET 接口**，
   不能改密码、退出或管理令牌；服务端只存 SHA-256，撤销即时生效；URL 里的令牌会被日志脱敏。
+- **跨平台**：后端 `psutil` + 标准库；Linux 走 `/proc`、`/sys`、`systemctl`，Windows 走
+  PowerShell(`ConvertTo-Json`) + `netsh` + `arp` 取同等真实数据（`platform_win.py`，15 处分派点，
+  前端零改动）。拿不到的（Windows 上的温度/风扇/整机功耗/核显频率）如实显示「不可用」。
+  详见 [docs/windows.md](docs/windows.md)。
 - **有测试**：66 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 8 个前端图表用例
   守住曲线绘制；CI 里跑 ruff + 两套测试 + 接口冒烟。
 
@@ -367,7 +371,9 @@ dashboard/
 ├── docs/
 │   ├── screenshot.png     # 本项目运行截图
 │   └── reference/         # UI 参考图（见该目录 README）
-├── run.sh                 # 启停脚本
+├── run.sh                  # Linux/macOS 启停脚本
+├── run.ps1                 # Windows 启停脚本
+├── platform_win.py         # Windows 专有采集（PowerShell/netsh/arp），Linux 上与 collector 二选一                 # 启停脚本
 └── pyproject.toml         # 仅放 pytest / ruff 配置（本项目不做打包分发）
 ```
 

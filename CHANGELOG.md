@@ -7,6 +7,16 @@
 
 ### 新增
 
+- **Windows 移植**（`platform_win.py` + 15 处平台分派）：主机信息改用 PowerShell
+  (`Win32_OperatingSystem`/`Win32_ComputerSystem`/`Win32_BIOS`/`Win32_Processor`/`Win32_DiskDrive`)，
+  USB/蓝牙用 `Get-PnpDevice`，系统服务用 `Get-Service`（前端卡片标题随之切换），
+  无线网卡用 `netsh wlan show interfaces`（信号为百分比），邻居表用 `arp -a`、
+  ICMP 探测改 Windows 的 `-n/-w`；温度/风扇/RAPL 功耗/核显频率在 Windows 上如实降级。
+  - 新增 `run.ps1` 与 `deploy/install-windows.ps1`（用系统自带 sc.exe 装成服务，无需 NSSM；
+    默认 LocalSystem，可 `-User` 降权）；
+  - 新增 `docs/windows.md`：装机、三种运行方式、能力对照表，以及一份**待 Windows 实测**的自检清单；
+  - 新增 `tests/test_windows_port.py`：8 个纯解析函数用例（arp/netsh/ping/PnP/Get-Service/WMI），
+    CI 在 Linux 上也能守住 Windows 分支。
 - **只读 API Token**：给 Bot / 脚本用的机器凭据，不必保存账号密码、也不受改密码影响。
   - 页面「账号」里创建（完整令牌**只显示这一次**）与撤销；也可用 `DASHBOARD_API_TOKEN`
     在启动时播种（仅在还没有任何令牌时生效）；

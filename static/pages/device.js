@@ -156,6 +156,8 @@
         if (wireless.ssid) detail.push('SSID ' + wireless.ssid);
         if (wireless.signal_dbm !== null && wireless.signal_dbm !== undefined) {
           detail.push('信号 ' + wireless.signal_dbm + ' dBm');
+        } else if (wireless.signal !== null && wireless.signal !== undefined) {
+          detail.push('信号 ' + wireless.signal + '%');
         }
       }
       return '<div class="iface-row">' +

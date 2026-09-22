@@ -48,7 +48,7 @@
         '</div>' +
       '</div>' +
       '<div class="card">' +
-        '<div class="card-head"><span>系统服务</span>' +
+        '<div class="card-head"><span id="systemd-title">系统服务</span>' +
         '<span class="head-note" id="systemd-note">—</span></div>' +
         '<div class="card-body"><div class="systemd-rows" id="systemd-rows"></div></div>' +
       '</div>';
@@ -159,7 +159,8 @@
     if (!systemd || !systemd.available) {
       note.textContent = '不可用';
       host.innerHTML = '<div class="empty">' +
-        esc((systemd && systemd.reason) || '无法读取 systemd') + '</div>';
+        esc((systemd && systemd.reason) ||
+            (isWindows() ? '无法读取 Windows 服务列表' : '无法读取 systemd')) + '</div>';
       return;
     }
     note.textContent = systemd.total + ' 个运行中';
@@ -191,12 +192,23 @@
   }
 
   window.DashPages = window.DashPages || {};
+  /* Windows 上没有 systemd，卡片标题随平台切换（后端 `_collect_systemd` 也会换成 Get-Service） */
+  function isWindows() {
+    return /Win/i.test(navigator.platform || '') || /Windows/i.test(navigator.userAgent || '');
+  }
+
+  function applyPlatformTitle() {
+    var node = document.getElementById('systemd-title');
+    if (node && isWindows()) node.textContent = 'Windows 服务';
+  }
+
   DashPages.services = {
     title: '服务',
     interval: 5000,
     mount: function (host) {
       lastProbes = [];
       build(host);
+      applyPlatformTitle();      // Windows 上没有 systemd，卡片标题换成「Windows 服务」
     },
     tick: tick,
     render: render,          /* 公开给探针/测试 */

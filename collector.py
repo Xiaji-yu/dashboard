@@ -14,6 +14,7 @@ import re
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 
@@ -69,6 +70,11 @@ LAN_SWEEP_INTERVAL = 120.0
 LAN_MAX_HOSTS = 256
 LAN_PING_WORKERS = 32
 LAN_SSDP_WINDOW = 2.5
+# Windows 平台走 platform_win（psutil + PowerShell）；Linux 保持原有实现
+IS_WINDOWS = sys.platform.startswith("win")
+if IS_WINDOWS:                                  # pragma: no cover - 仅在 Windows 导入
+    import platform_win as win
+
 # IEEE OUI 厂商库（发行版可能放在这几个位置）
 OUI_PATHS = ("/usr/share/ieee-data/oui.txt", "/var/lib/ieee-data/oui.txt",
              "/usr/share/misc/oui.txt")
@@ -508,6 +514,8 @@ class Collector:
 
     def _read_core_topology(self):
         """逻辑核序号 -> 物理核心号（读不到为 -1），用于每核占用的展示口径。"""
+        if IS_WINDOWS:                          # Windows 拿不到拓扑，前端退化成「线程 N」
+            return [-1] * self.cores
         topology = []
         for i in range(self.cores):
             raw = self._read_sys(f"/sys/devices/system/cpu/cpu{i}/topology/core_id")
@@ -607,6 +615,9 @@ class Collector:
         return info
 
     def _process_container_id(self, pid):
+        """Windows 没有 cgroup 文件；容器归属留空由前端显示「—」。"""
+        if IS_WINDOWS:
+            return None
         """进程是否跑在容器里：读 cgroup 拿容器 ID（只缓存 ID，名字每次实时映射）。"""
         raw = self._read_sys(f"/proc/{pid}/cgroup")
         container_id = container_id_from_cgroup(raw)
@@ -848,6 +859,8 @@ class Collector:
         return self._temp_from(self._all_temps())
     def _all_temps(self):
         """全部温度通道。性能页展示列表，概览的单值温度也从这里挑，避免重复读 sysfs。"""
+        if IS_WINDOWS:
+            return win.temps()
         try:
             sensors = psutil.sensors_temperatures() or {}
         except Exception as exc:
@@ -918,6 +931,8 @@ class Collector:
 
     def _fans(self):
         """全部风扇转速。读数为 0 的（如停转的 gpu_fan）也如实保留。"""
+        if IS_WINDOWS:
+            return win.fans()
         try:
             chips = psutil.sensors_fans() or {}
         except Exception as exc:
@@ -941,6 +956,8 @@ class Collector:
         return battery_payload(batt, self._power_supplies())
 
     def _power_supplies(self):
+        if IS_WINDOWS:                          # 电池走 psutil.sensors_battery，无 sysfs 可读
+            return []
         supplies = []
         try:
             names = sorted(os.listdir("/sys/class/power_supply"))
@@ -969,8 +986,22 @@ class Collector:
     # ---------------- 网络与磁盘 ----------------
 
     def _read_gateway(self):
-        """默认网关：/proc/net/route 免 root 读取。"""
+        """默认网关：Linux 读 /proc/net/route 免 root；Windows 用 route print。"""
+        if IS_WINDOWS:
+            return win.gateway_address()
         return parse_default_gateway(self._read_sys("/proc/net/route"))
+
+    def _neighbors(self):
+        """邻居表（ARP）：Linux 读 /proc/net/arp，Windows 用 arp -a。"""
+        if IS_WINDOWS:
+            return win.arp_table()
+        return parse_arp_table(self._read_sys("/proc/net/arp"))
+
+    def _ping_host(self, ip):
+        """单次 ICMP：两个平台的 ping 参数不同（Linux -c/-W，Windows -n/-w）。"""
+        if IS_WINDOWS:
+            return win.ping(ip)
+        return self._ping(ip)
 
     @staticmethod
     def tcp_latency(host, port, timeout=0.6):
@@ -1127,7 +1158,14 @@ class Collector:
         return {"nic": nic, "connection": connection}
 
     def _disk_static(self):
-        """磁盘静态信息：设备、型号、容量、是否机械盘、总线（读一次后缓存）。"""
+        """磁盘静态信息：设备、型号、容量、是否机械盘、总线（读一次后缓存）。
+
+        Windows 没有 /sys/block，走 WMI（Win32_DiskDrive）取真实型号与容量。
+        """
+        if IS_WINDOWS:
+            if self._disk_static_cache is None:
+                self._disk_static_cache = win.disk_static()
+            return self._disk_static_cache
         if self._disk_static_cache is not None:
             return self._disk_static_cache
         info = {"device": None, "block": None, "model": None,
@@ -1212,7 +1250,9 @@ class Collector:
     # ---------------- 设备页：主机 / 处理器 / 内存磁盘 / 网络 / 运行环境 ----------------
 
     def _cpu_caches(self):
-        """从 sysfs 读各级缓存（免 root、免起 lscpu）。"""
+        """从 sysfs 读各级缓存（免 root、免起 lscpu）。Windows 无等价接口。"""
+        if IS_WINDOWS:
+            return []
         rows = []
         base = "/sys/devices/system/cpu/cpu0/cache"
         for index in range(5):
@@ -1281,10 +1321,13 @@ class Collector:
         return "有线"
 
     def _usb_devices(self):
-        """USB 设备：读 sysfs（厂商与型号分字段、免 root）。
+        """USB 设备：Linux 读 sysfs（厂商与型号分字段、免 root）；Windows 枚举 PnP 设备。
 
         1d6b 是 Linux 基金会的根集线器——那是控制器本身，不是外接设备，标记出来由前端弱化。
+        Windows 侧没有这种厂商 ID，按根集线器名称识别。
         """
+        if IS_WINDOWS:
+            return win.usb_devices()
         rows = []
         base = "/sys/bus/usb/devices"
         try:
@@ -1311,7 +1354,9 @@ class Collector:
         return rows
 
     def _bluetooth(self):
-        """蓝牙：适配器看 /sys/class/bluetooth，已配对设备问 bluetoothctl。"""
+        """蓝牙：Linux 看 /sys/class/bluetooth 并问 bluetoothctl；Windows 枚举 PnP。"""
+        if IS_WINDOWS:
+            return win.bluetooth_devices()
         try:
             adapters = sorted(os.listdir("/sys/class/bluetooth"))
         except OSError:
@@ -1432,7 +1477,7 @@ class Collector:
         live = []
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=LAN_PING_WORKERS) as pool:
-            for result in pool.map(self._ping, hosts):
+            for result in pool.map(self._ping_host, hosts):
                 if result:
                     live.append(result)
         return live
@@ -1488,7 +1533,7 @@ class Collector:
         except Exception as exc:                      # 扫描失败不该影响页面
             note = f"ICMP 探测失败：{exc}"
         ssdp = self._ssdp_scan()
-        arp = parse_arp_table(self._read_sys("/proc/net/arp"))
+        arp = self._neighbors()
         rows = []
         for ip in sorted(set(live) | {item for item in ssdp if item.startswith(subnet["prefix"])},
                          key=lambda text: [int(part) for part in text.split(".")]):
@@ -1523,7 +1568,7 @@ class Collector:
         cache, scanned_at = self._lan_cache
         subnet = self._local_subnet()
         prefix = subnet["prefix"] if subnet else None
-        arp = parse_arp_table(self._read_sys("/proc/net/arp"))
+        arp = self._neighbors()
         table = load_oui()
         devices = {}
 
@@ -1561,6 +1606,8 @@ class Collector:
 
     def _collect_device(self):
         """设备页：本机摘要 + 与这台机器连接的设备（USB / 蓝牙 / 网络 / 局域网）。"""
+        if IS_WINDOWS:
+            return self._collect_device_windows()
         os_release = parse_os_release(self._read_sys("/etc/os-release"))
         cpuinfo = self._read_sys("/proc/cpuinfo") or ""
         caches = self._cpu_caches()
@@ -1603,6 +1650,32 @@ class Collector:
                 "psutil": psutil.__version__,
                 "docker": self._docker_version(),
             },
+        }
+
+    def _collect_device_windows(self):
+        """Windows 的设备页：Linux 专有接口（/proc、/sys）用 platform_win 替代，
+        其余（内存/接口/局域网/电池）复用跨平台的 psutil 实现。"""
+        static = win.collect_device_static()
+        summary = static["summary"]
+        summary.update({
+            "hostname": socket.gethostname(),
+            "uptime_s": round(max(0.0, time.time() - self.boot_time)),
+            "memory_gb": self._memory().get("total_gb"),
+            "swap_gb": self._memory().get("swap_total_gb"),
+            "gpu": None,
+            "disk": static["disk"],
+            "mounts": static["disk"].get("mounts"),
+        })
+        stat_info = static["disk"]
+        battery = self._battery()
+        return {
+            "summary": summary,
+            "usb": static["usb"],
+            "bluetooth": static["bluetooth"],
+            "interfaces": self._interfaces(),
+            "lan": self.lan_devices(),
+            "battery": battery if battery.get("available") else None,
+            "runtime": win.runtime_versions(),
         }
 
     # ---------------- 服务页：端口 / systemd / 容器 / 远程探测 ----------------
@@ -1660,6 +1733,9 @@ class Collector:
 
     @staticmethod
     def _collect_systemd(limit=80):
+        """运行中的系统服务（Linux）或 Windows 服务（Windows）；都没有就如实降级。"""
+        if IS_WINDOWS:
+            return win.windows_services(limit)
         try:
             done = subprocess.run(
                 ["systemctl", "list-units", "--type=service", "--state=running",
