@@ -1729,7 +1729,6 @@ class Collector:
             "disk": static["disk"],
             "mounts": static["disk"].get("mounts"),
         })
-        stat_info = static["disk"]
         battery = self._battery()
         return {
             "summary": summary,
