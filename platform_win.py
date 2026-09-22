@@ -458,6 +458,47 @@ def disk_rows_from_wmi(payload):
     return rows
 
 
+def infer_rotational(model, bus, current):
+    """MediaType 拿不到时的兜底判断——只用**定义性**证据，绝不瞎猜：
+
+    - 型号/名称里写着 SSD（例如实测的 "SSD 1TB"）；
+    - 挂在 NVMe 总线上（NVMe 只有 NAND，不可能有机械盘）。
+
+    其它情况保持 None（未知），前端显示「—」，不会谎报成机械盘。
+    """
+    if current is not None:
+        return current
+    if re.search(r"(?i)\bSSD\b", model or ""):
+        return False
+    if (bus or "") == "NVMe":
+        return False
+    return None
+
+
+def merge_physical_disk(row, payload):
+    """用 Get-PhysicalDisk 的结果补一次 MediaType/BusType。
+
+    NVMe 盘上 `Get-Disk` 常常不报 MediaType（实测本机就是），而 Get-PhysicalDisk
+    一般还有；按容量或型号匹配上就补进去。
+    """
+    if not payload or not isinstance(row, dict):
+        return row
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        same_size = to_gb(item.get("Size")) is not None \
+            and to_gb(item.get("Size")) == row.get("size_gb")
+        same_name = clean_text(item.get("FriendlyName")) == row.get("model")
+        if not (same_size or same_name):
+            continue
+        if row.get("rotational") is None:
+            row["rotational"] = disk_media(item.get("MediaType"))
+        if row.get("bus") is None:
+            row["bus"] = disk_bus(item.get("BusType"))
+        break
+    return row
+
+
 def disk_static(mount=None):
     """磁盘型号/容量/机械还是固态，优先取「监控盘所在的那块物理盘」。
 
@@ -486,6 +527,15 @@ def disk_static(mount=None):
     if not rows:
         return {"available": False, "reason": "拿不到磁盘信息（存储模块与 WMI 都失败）"}
     first = dict(rows[0])
+    if first.get("rotational") is None:
+        # Get-Disk 在 NVMe 上常缺 MediaType，补一次 Get-PhysicalDisk
+        first = merge_physical_disk(first, powershell_json(
+            "Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object DeviceId,"
+            "FriendlyName,Size,@{n='MediaType';e={$_.MediaType.ToString()}},"
+            "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
+    # 仍然未知时，用型号/NVMe 这两条定义性证据兜底（不猜机械盘）
+    first["rotational"] = infer_rotational(first.get("model"), first.get("bus"),
+                                           first.get("rotational"))
     first.update({"available": True, "reason": None, "mounts": mounts_of_system()})
     return first
 

@@ -12,8 +12,9 @@ from unittest import mock
 import platform_win
 from platform_win import (clean_text, disk_bus, disk_media, disk_rows_from_storage,
                           disk_rows_from_wmi, drive_letter, enum_number,
-                          filter_usb_instances, format_cpu_cache, interpret_output,
-                          is_usb_hub, parse_arp, parse_netsh_ssid, parse_ping_alive,
+                          filter_usb_instances, format_cpu_cache, infer_rotational,
+                          interpret_output, is_usb_hub, merge_physical_disk, parse_arp,
+                          parse_netsh_ssid, parse_ping_alive,
                           parse_pnp_devices, parse_services, parse_wmi_instance,
                           to_gb, to_mb)
 
@@ -259,6 +260,52 @@ class DiskEnumTest(unittest.TestCase):
         self.assertFalse(is_usb_hub("G502 HERO", "USB\\VID_046D&PID_C08B\\1194"))
         self.assertFalse(is_usb_hub("USB 大容量存储设备", "USB\\VID_1F75&PID_0903\\0000"))
         self.assertFalse(is_usb_hub("USB Composite Device", "USB\\VID_3837&PID_3028\\554A"))
+
+
+class RotationalInferenceTest(unittest.TestCase):
+    """实测：NVMe 盘的 Get-Disk 不报 MediaType（rotational 为 null），需要兜底。
+
+    兜底只用定义性证据：型号里写 SSD、或挂在 NVMe 总线上（NVMe 只有 NAND）。
+    """
+
+    def test_model_says_ssd(self):
+        self.assertFalse(infer_rotational("SSD 1TB", None, None))
+        self.assertFalse(infer_rotational("CT1000P3PSSD8", "SATA", None))
+
+    def test_nvme_bus_is_always_ssd(self):
+        self.assertFalse(infer_rotational("Unknown Model", "NVMe", None))
+
+    def test_never_claims_mechanical(self):
+        """型号不带 SSD、总线也判不出时，必须是 None（未知），绝不能谎报机械盘。"""
+        self.assertIsNone(infer_rotational("WDC WD10EZEX-08WN4A0", "SATA", None))
+        self.assertIsNone(infer_rotational(None, None, None))
+        self.assertIsNone(infer_rotational("", "SCSI", None))
+
+    def test_existing_judgement_wins(self):
+        self.assertTrue(infer_rotational("SSD 1TB", "NVMe", True))
+        self.assertFalse(infer_rotational("SSD 1TB", "NVMe", False))
+
+    def test_merge_physical_disk_by_size(self):
+        row = {"model": "SSD 1TB", "size_gb": 953.9, "rotational": None, "bus": "NVMe"}
+        merged = merge_physical_disk(row, [{"FriendlyName": "别的盘", "Size": 500107862016,
+                                            "MediaType": "HDD", "BusType": "SATA"},
+                                           {"FriendlyName": "SSD 1TB",
+                                            "Size": 1024209543168,
+                                            "MediaType": "SSD", "BusType": "NVMe"}])
+        self.assertFalse(merged["rotational"], "按容量匹配到 SSD 那块")
+        self.assertEqual(merged["bus"], "NVMe")
+
+    def test_merge_physical_disk_no_match_keeps_none(self):
+        row = {"model": "X", "size_gb": 100.0, "rotational": None, "bus": None}
+        merged = merge_physical_disk(row, [{"FriendlyName": "无关", "Size": 999,
+                                            "MediaType": "SSD", "BusType": "SATA"}])
+        self.assertIsNone(merged["rotational"])
+        self.assertIsNone(merged["bus"])
+
+    def test_merge_physical_disk_handles_bad_payload(self):
+        row = {"model": "X", "size_gb": 1.0, "rotational": None, "bus": None}
+        for payload in (None, [], "not-a-list", [None, "x"]):
+            self.assertEqual(merge_physical_disk(dict(row), payload), row)
 
 
 class InterpretOutputTest(unittest.TestCase):
