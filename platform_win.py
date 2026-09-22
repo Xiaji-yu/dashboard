@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -56,9 +57,23 @@ def run_powershell(script, timeout=POWERSHELL_TIMEOUT):
         return None
     except (OSError, subprocess.SubprocessError):
         return None
-    if done.returncode != 0 or not (done.stdout or "").strip():
+    return interpret_output(done.returncode, done.stdout, done.stderr)
+
+
+def interpret_output(returncode, stdout, stderr):
+    """子进程结果 -> 文本；None 表示这次查询失败（调用方降级为「不可用」）。
+
+    关键区别（Linux 版也是这个契约）：
+    - 返回空字符串 = **命令成功但没有对象**，例如机器没有蓝牙适配器；
+    - 返回 None = 命令失败，例如没有 Get-PnpDevice（家庭版/被管控的机器）。
+    「没输出 + 有报错」按失败处理，否则会把缺命令误报成「没有这类设备」。
+    """
+    if returncode != 0:
         return None
-    return done.stdout
+    stdout = stdout or ""
+    if not stdout.strip() and (stderr or "").strip():
+        return None
+    return stdout
 
 
 def _command_exists(name):
@@ -73,20 +88,51 @@ def _command_exists(name):
 
 
 def powershell_json(script, timeout=POWERSHELL_TIMEOUT):
-    """跑 PowerShell 并解析 ConvertTo-Json 输出；单个对象的 JSON 会包成 dict。"""
-    text = run_powershell(script, timeout)
-    if text is None:
+    """跑 PowerShell 并解析 ConvertTo-Json 输出。
+
+    输出用 base64 传回：Windows PowerShell 5.1 在重定向时按 **UTF-16LE** 输出（无 BOM），
+    直接按 UTF-8 解码会把中文变成乱码（实测「专业工作站版」→「רҵ����վ��」）。
+    转成 base64 后是纯 ASCII，与代码页、BOM、PS 版本都无关。
+
+    返回 list（单条结果也包成 list）：
+    - 命令失败 → None（调用方为「不可用」）
+    - 成功但没有对象 → []（调用方为「没有这类设备」）
+    """
+    wrapped = ("[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("
+               "(" + script + " | Out-String)))")
+    raw = run_powershell(wrapped, timeout)
+    if raw is None:
         return None
+    text = raw.strip()
+    if not text:
+        return []
     try:
-        payload = json.loads(text)
+        decoded = base64.b64decode(text).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not decoded.strip():
+        return []
+    try:
+        payload = json.loads(decoded)
     except ValueError:
         return None
     if isinstance(payload, dict):
-        # 单条结果 ConvertTo-Json 输出对象；统一成 list 方便调用方遍历
         return [payload]
-    if isinstance(payload, list):
-        return payload
-    return None
+    return payload if isinstance(payload, list) else None
+
+
+# WMI 里代表「没填」的占位字符串（主板厂商常写 Default string）
+PLACEHOLDER_VALUES = {"default string", "to be filled by o.e.m.", "system product name",
+                      "system version", "none", "unknown", "o.e.m.", "not applicable",
+                      "not specified", "填充由 o.e.m.", "默认字符串"}
+
+
+def clean_text(value):
+    """去掉空白与厂商占位串；拿不到就返回 None（前端显示「—」而不是假的型号）。"""
+    text = (value or "").strip()
+    if not text or text.lower() in PLACEHOLDER_VALUES:
+        return None
+    return text
 
 
 # ---------------- 纯解析函数（可在任意平台测试） ----------------
@@ -229,10 +275,11 @@ def machine_info():
     firmware = parse_wmi_instance(bios) if bios else {}
     reason = None if machine or firmware else "WMI 查询失败（可能是系统限制或 PowerShell 不可用）"
     return {
-        "vendor": (machine.get("Manufacturer") or "").strip() or None,
-        "product": (machine.get("Model") or "").strip() or None,
-        "board": (machine.get("SystemFamily") or "").strip() or None,
-        "bios": (firmware.get("SMBIOSBIOSVersion") or "").strip() or None,
+        "vendor": clean_text(machine.get("Manufacturer")),
+        "product": clean_text(machine.get("Model")),
+        # 主板厂商常写 "Default string"：那是占位符，不是型号，按未知处理
+        "board": clean_text(machine.get("SystemFamily")),
+        "bios": clean_text(firmware.get("SMBIOSBIOSVersion")),
         "reason": reason,
     }
 
@@ -274,42 +321,98 @@ def cpu_summary():
     }
 
 
-def disk_static():
-    """磁盘型号/容量/机械还是固态（Win32_DiskDrive）。"""
-    payload = powershell_json(
-        "Get-CimInstance Win32_DiskDrive | Select-Object Model,Size,MediaType,"
-        "InterfaceType,DeviceID | ConvertTo-Json -Compress")
-    if not payload:
-        return {"available": False, "reason": "WMI 查询失败（Win32_DiskDrive）"}
+# MSFT_PhysicalDisk.MediaType：3=HDD、4=SSD、5=SCM；其它值一律当作未知（不猜）
+DISK_MEDIA = {3: True, 4: False, 5: None}
+# MSFT_BusType 里我有把握的部分；其它值返回 None，宁可显示未知也不写错
+DISK_BUS = {1: "SCSI", 3: "ATA", 4: "1394", 6: "FC", 7: "SAS", 8: "SATA",
+            11: "虚拟", 14: "NVMe", 15: "SCM"}
+
+
+def to_gb(value):
+    try:
+        return round(int(value) / 1024 ** 3, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def drive_letter(mount):
+    """把监控路径换成一个盘符；Windows 上 "/" 视为系统盘。"""
+    match = re.match(r"([A-Za-z]):", (mount or "").strip())
+    if match:
+        return match.group(1).upper()
+    system = os.environ.get("SystemDrive", "C:")
+    return system[0].upper() if system else None
+
+
+def disk_rows_from_storage(payload):
+    """Get-Disk 的结果 -> 统一磁盘条目。"""
     rows = []
-    for item in payload:
-        name = (item.get("Model") or "").strip()
+    for item in payload or []:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("Number")
+        rows.append({
+            "device": f"磁盘 {number}" if number is not None else None,
+            "model": clean_text(item.get("FriendlyName")),
+            "size_gb": to_gb(item.get("Size")),
+            "rotational": DISK_MEDIA.get(item.get("MediaType")),
+            "bus": DISK_BUS.get(item.get("BusType")),
+        })
+    return [row for row in rows if row["model"] or row["size_gb"]]
+
+
+def disk_rows_from_wmi(payload):
+    """Win32_DiskDrive 的结果 -> 统一磁盘条目；判不出机械/固态就留 None。"""
+    rows = []
+    for item in payload or []:
+        if not isinstance(item, dict):
+            continue
+        name = clean_text(item.get("Model"))
         if not name:
             continue
-        size_gb = None
-        try:
-            size_gb = round(int(item.get("Size")) / 1024 ** 3, 1)
-        except (TypeError, ValueError):
-            size_gb = None
         media = (item.get("MediaType") or "").strip()
         rotational = None
-        if media:
-            rotational = "Fixed hard disk" in media or "Fixed hard disk media" in media
+        if re.search(r"(?i)\bSSD\b", media) or "固态" in media:
+            rotational = False
+        # 注意："Fixed hard disk media" 是内建硬盘的泛化值，**SSD 也会报**（本机实测），
+        # 它不含任何旋转信息，所以这里保持 None（未知），绝不据此断言是机械盘。
+        # 真正的判据是存储模块的 MediaType（见 disk_static）。
         rows.append({
-            "device": (item.get("DeviceID") or "").strip() or None,
+            "device": clean_text(item.get("DeviceID")),
             "model": name,
-            "size_gb": size_gb,
+            "size_gb": to_gb(item.get("Size")),
             "rotational": rotational,
-            "bus": (item.get("InterfaceType") or "").strip() or None,
+            "bus": clean_text(item.get("InterfaceType")),
         })
+    return rows
+
+
+def disk_static(mount=None):
+    """磁盘型号/容量/机械还是固态，优先取「监控盘所在的那块物理盘」。
+
+    实测教训：`Win32_DiskDrive.MediaType` 在 MSI 这台机器上把 SSD 报成泛化的
+    "Fixed hard disk media"，于是被误判为机械盘。存储模块的 `Get-Disk` 给出
+    MediaType（3=HDD / 4=SSD）与 BusType（SATA/NVMe），所以优先用它。
+    """
+    letter = drive_letter(mount)
+    rows = []
+    if letter:
+        rows = disk_rows_from_storage(powershell_json(
+            f"Get-Partition -DriveLetter {letter} -ErrorAction SilentlyContinue | "
+            "Get-Disk | Select-Object Number,FriendlyName,BusType,MediaType,Size | "
+            "ConvertTo-Json -Compress"))
     if not rows:
-        return {"available": False, "reason": "WMI 没返回磁盘信息"}
-    # 页面用「第一块盘」；有系统盘则优先
-    system_drive = os.environ.get("SystemDrive", "C:")
-    first = next((row for row in rows
-                  if row["device"] and row["device"].lower().startswith(system_drive.lower())),
-                 rows[0])
-    first = dict(first)
+        rows = disk_rows_from_storage(powershell_json(
+            "Get-Disk -ErrorAction SilentlyContinue | "
+            "Select-Object Number,FriendlyName,BusType,MediaType,Size | "
+            "ConvertTo-Json -Compress"))
+    if not rows:
+        rows = disk_rows_from_wmi(powershell_json(
+            "Get-CimInstance Win32_DiskDrive | Select-Object Model,Size,MediaType,"
+            "InterfaceType,DeviceID | ConvertTo-Json -Compress") or [])
+    if not rows:
+        return {"available": False, "reason": "拿不到磁盘信息（存储模块与 WMI 都失败）"}
+    first = dict(rows[0])
     first.update({"available": True, "reason": None, "mounts": mounts_of_system()})
     return first
 
@@ -338,6 +441,22 @@ def mounts_of_system():
     return rows
 
 
+def filter_usb_instances(payload):
+    """只保留真正挂在 USB 总线上的设备。
+
+    `Get-PnpDevice -Class USB` 会连带列出「USB 控制器」这类 PCI 设备
+    （实测有 Intel(R) USB 3.20 可扩展主机控制器，InstanceId 以 PCI\\ 开头），
+    它们不是外接设备，混进列表会让人以为插了东西。
+    """
+    rows = []
+    for item in payload or []:
+        instance = (item.get("InstanceId") or "").strip().upper()
+        if instance and not instance.startswith("USB\\"):
+            continue
+        rows.append(item)
+    return rows
+
+
 def usb_devices():
     """USB 设备（Get-PnpDevice -Class USB）。输出与 Linux 版同形。"""
     payload = powershell_json(
@@ -346,7 +465,7 @@ def usb_devices():
     if payload is None:
         return {"available": False, "reason": "PowerShell 查询失败（Get-PnpDevice）", "list": []}
     rows = []
-    for item in payload:
+    for item in filter_usb_instances(payload):
         name = (item.get("FriendlyName") or "").strip()
         instance = (item.get("InstanceId") or "").strip()
         if not name and not instance:
@@ -383,7 +502,7 @@ def bluetooth_devices():
         if re.search(r"(?i)bluetooth|蓝牙", name):
             adapters.append(name)
     return {"available": bool(devices), "adapters": adapters, "devices": devices,
-            "reason": None if devices else "没有蓝牙设备/适配器"}
+            "reason": None if devices else "没有蓝牙适配器（设备管理器里也没有蓝牙类设备）"}
 
 
 def windows_services(limit=80):

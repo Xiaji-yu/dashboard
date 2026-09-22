@@ -59,10 +59,33 @@ cd C:\path\\to\dashboard
 
 > 说明：上表标「不可用」的项在前端会显示「不可用」+ 原因，不会造假；这是本项目一贯的降级契约。
 
+## 实测反馈与已修问题
+
+在 Windows 11（MSI MS-7D99 / i5-14600K / SSD 1TB）上实测发现并修复了 5 个问题，
+都是「只有真机才会暴露」的：
+
+| 现象 | 根因 | 修法 |
+| --- | --- | --- |
+| 中文全变乱码（`专业工作站版` → `רҵ����վ��`） | Windows PowerShell 5.1 重定向输出是 **UTF-16LE**，按 UTF-8 解码就成乱码 | PowerShell 端 `[Convert]::ToBase64String(...)` 传回，Python 侧 base64 解码——与代码页/BOM/PS 版本彻底无关 |
+| 蓝牙报「PowerShell 查询失败」 | 机器根本没有蓝牙设备，`Get-PnpDevice` 返回**空**，我把空输出当成了失败 | 区分「命令失败」（None）与「成功但无对象」（空列表），后者显示「没有蓝牙适配器」 |
+| USB 列表里混进「Intel USB 3.20 可扩展主机控制器」 | `Get-PnpDevice -Class USB` 会连带列出 PCI 总线上的控制器 | 只保留 `InstanceId` 以 `USB\` 开头的条目 |
+| 主板显示 `Default string` | 主板厂商的占位字符串（不是型号） | 识别常见占位串（Default string / To be filled by O.E.M. / System Product Name）按未知处理 |
+| **SSD 被显示成机械盘** | `Win32_DiskDrive.MediaType` 对 SSD 也返回泛化的 `Fixed hard disk media` | 改用存储模块 `Get-Partition <盘符> \| Get-Disk`（MediaType 3=HDD/4=SSD，BusType 区分 SATA/NVMe）；WMI 回退路径不再据泛化值下结论，改为「未知」 |
+
+另外：频率只知道最大值时（Windows 上 psutil 给不出最小频率）改为显示「最大 3500 MHz」，
+不再整行显示「—」。
+
 ## 我想请你在 Windows 上帮我验证
 
 前提：`python -m pip install psutil` 已装好（缺它会直接 `ModuleNotFoundError`，
 现在导入 `platform_win` 时会给出这句人话提示）。
+
+**修完 5 个问题后请再跑一次这条**，确认中文正常、SSD 显示固态、USB 不再有控制器：
+
+```powershell
+git pull
+python -c "import platform_win as w, json; print(json.dumps(w.collect_device_static(), ensure_ascii=False, indent=1))"
+```
 
 我在 Linux 上没有 Windows 机器，**以下都是未实测的**。麻烦在有 Windows 的机器上跑一遍，把
 输出发我（直接贴文本即可）：

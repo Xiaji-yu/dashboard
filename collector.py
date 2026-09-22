@@ -1164,7 +1164,8 @@ class Collector:
         """
         if IS_WINDOWS:
             if self._disk_static_cache is None:
-                self._disk_static_cache = win.disk_static()
+                # 传入监控路径：Windows 上会折算成盘符（"/" 视为系统盘）
+                self._disk_static_cache = win.disk_static(self.disk_path)
             return self._disk_static_cache
         if self._disk_static_cache is not None:
             return self._disk_static_cache
