@@ -415,6 +415,41 @@ def drive_letter(mount):
     return system[0].upper() if system else None
 
 
+def disk_number_for_letter(letter):
+    """盘符 -> 物理磁盘号（Get-Partition <盘符> | Get-Disk）。拿不到返回 None。"""
+    if not letter:
+        return None
+    payload = powershell_json(
+        f"Get-Partition -DriveLetter {letter} -ErrorAction SilentlyContinue | "
+        "Get-Disk | Select-Object Number | ConvertTo-Json -Compress")
+    if not payload:
+        return None
+    number = parse_wmi_instance(payload).get("Number")
+    return number if isinstance(number, int) else None
+
+
+def disk_rows_from_physical(payload):
+    """Get-PhysicalDisk 的结果 -> 统一磁盘条目。
+
+    实测（MSI MS-7D99 / NVMe）：`Get-Disk` 的 MediaType **全为空**，
+    而 `Get-PhysicalDisk` 明确给出 SSD/NVMe——所以这个是主数据源。
+    """
+    rows = []
+    for item in payload or []:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("DeviceId")
+        rows.append({
+            "number": number if isinstance(number, int) else None,
+            "device": f"磁盘 {number}" if number is not None else None,
+            "model": clean_text(item.get("FriendlyName")),
+            "size_gb": to_gb(item.get("Size")),
+            "rotational": disk_media(item.get("MediaType")),
+            "bus": disk_bus(item.get("BusType")),
+        })
+    return [row for row in rows if row["model"] or row["size_gb"]]
+
+
 def disk_rows_from_storage(payload):
     """Get-Disk 的结果 -> 统一磁盘条目。"""
     rows = []
@@ -423,6 +458,7 @@ def disk_rows_from_storage(payload):
             continue
         number = item.get("Number")
         rows.append({
+            "number": number if isinstance(number, int) else None,
             "device": f"磁盘 {number}" if number is not None else None,
             "model": clean_text(item.get("FriendlyName")),
             "size_gb": to_gb(item.get("Size")),
@@ -475,26 +511,21 @@ def infer_rotational(model, bus, current):
     return None
 
 
-def merge_physical_disk(row, payload):
-    """用 Get-PhysicalDisk 的结果补一次 MediaType/BusType。
+def merge_same_number(row, rows, number):
+    """用**同一块物理盘**的另一份数据补齐 rotational/bus。
 
-    NVMe 盘上 `Get-Disk` 常常不报 MediaType（实测本机就是），而 Get-PhysicalDisk
-    一般还有；按容量或型号匹配上就补进去。
+    Get-PhysicalDisk 与 Get-Disk 的字段互补（实测前者有 MediaType、后者没有；
+    反过来在别的机器上也可能），按磁盘号匹配后互相补空即可。
     """
-    if not payload or not isinstance(row, dict):
+    if number is None or not rows:
         return row
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        same_size = to_gb(item.get("Size")) is not None \
-            and to_gb(item.get("Size")) == row.get("size_gb")
-        same_name = clean_text(item.get("FriendlyName")) == row.get("model")
-        if not (same_size or same_name):
+    for candidate in rows:
+        if candidate.get("number") != number:
             continue
         if row.get("rotational") is None:
-            row["rotational"] = disk_media(item.get("MediaType"))
+            row["rotational"] = candidate.get("rotational")
         if row.get("bus") is None:
-            row["bus"] = disk_bus(item.get("BusType"))
+            row["bus"] = candidate.get("bus")
         break
     return row
 
@@ -507,33 +538,38 @@ def disk_static(mount=None):
     MediaType（3=HDD / 4=SSD）与 BusType（SATA/NVMe），所以优先用它。
     """
     letter = drive_letter(mount)
-    rows = []
-    if letter:
-        rows = disk_rows_from_storage(powershell_json(
-            f"Get-Partition -DriveLetter {letter} -ErrorAction SilentlyContinue | "
-            "Get-Disk | Select-Object Number,FriendlyName,Size,"
-            "@{n='MediaType';e={$_.MediaType.ToString()}},"
-            "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
+    number = disk_number_for_letter(letter)
+    # 主数据源：Get-PhysicalDisk（MediaType/BusType 最全）
+    rows = disk_rows_from_physical(powershell_json(
+        "Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object DeviceId,"
+        "FriendlyName,Size,@{n='MediaType';e={$_.MediaType.ToString()}},"
+        "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
     if not rows:
+        # 回退一：Get-Disk（NVMe 上 MediaType 可能为空，但至少型号与容量可用）
         rows = disk_rows_from_storage(powershell_json(
             "Get-Disk -ErrorAction SilentlyContinue | "
             "Select-Object Number,FriendlyName,Size,"
             "@{n='MediaType';e={$_.MediaType.ToString()}},"
             "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
     if not rows:
+        # 回退二：WMI
         rows = disk_rows_from_wmi(powershell_json(
             "Get-CimInstance Win32_DiskDrive | Select-Object Model,Size,MediaType,"
             "InterfaceType,DeviceID | ConvertTo-Json -Compress") or [])
     if not rows:
         return {"available": False, "reason": "拿不到磁盘信息（存储模块与 WMI 都失败）"}
-    first = dict(rows[0])
-    if first.get("rotational") is None:
-        # Get-Disk 在 NVMe 上常缺 MediaType，补一次 Get-PhysicalDisk
-        first = merge_physical_disk(first, powershell_json(
-            "Get-PhysicalDisk -ErrorAction SilentlyContinue | Select-Object DeviceId,"
-            "FriendlyName,Size,@{n='MediaType';e={$_.MediaType.ToString()}},"
-            "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
-    # 仍然未知时，用型号/NVMe 这两条定义性证据兜底（不猜机械盘）
+    # 优先选监控盘所在的那块物理盘（拿不到盘号就用第一块）
+    target = next((row for row in rows if number is not None and row.get("number") == number),
+                  None) or rows[0]
+    first = dict(target)
+    if first.get("rotational") is None or first.get("bus") is None:
+        # 主源缺字段时，用同号盘的另一份数据互补（Get-Disk 与 Get-PhysicalDisk 字段互补）
+        first = merge_same_number(first, disk_rows_from_storage(powershell_json(
+            "Get-Disk -ErrorAction SilentlyContinue | "
+            "Select-Object Number,FriendlyName,Size,"
+            "@{n='MediaType';e={$_.MediaType.ToString()}},"
+            "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress")), number)
+    # 最后仍未知时，用型号/NVMe 这两条定义性证据兜底（绝不谎报机械盘）
     first["rotational"] = infer_rotational(first.get("model"), first.get("bus"),
                                            first.get("rotational"))
     first.update({"available": True, "reason": None, "mounts": mounts_of_system()})
