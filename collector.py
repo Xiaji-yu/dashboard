@@ -291,12 +291,49 @@ def format_sockaddr(addr_hex, is_v6):
         return addr_hex
 
 
+def scope_of(addr):
+    """绑定地址 -> 访问范围（页面上的「谁能访问」）。"""
+    if addr in ("0.0.0.0", "::"):
+        return "局域网"
+    if addr.startswith("127.") or addr in ("::1", "0:0:0:0:0:0:0:1"):
+        return "仅本机"
+    return "其他"
+
+
+def listen_sockets_psutil():
+    """用 psutil 枚举监听端口（Windows 没有 /proc/net/tcp）。
+
+    字段与 /proc 版保持一致：port / proto / addr / scope。
+    """
+    rows = []
+    try:
+        connections = psutil.net_connections(kind="inet")
+    except Exception:
+        return rows
+    seen = set()
+    for conn in connections:
+        if conn.status != "LISTEN" or not conn.laddr:
+            continue
+        addr = conn.laddr.ip or "0.0.0.0"
+        proto = "tcp6" if conn.family == socket.AF_INET6 else "tcp"
+        key = (conn.laddr.port, proto, addr)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"port": conn.laddr.port, "proto": proto,
+                     "addr": addr, "scope": scope_of(addr)})
+    rows.sort(key=lambda item: item["port"])
+    return rows
+
+
 def listen_sockets():
     """监听中的 TCP 端口，附带绑定地址与访问范围。
 
     「仅本机」= 绑在 127.x / ::1，只有本机能连；「局域网」= 绑在 0.0.0.0 / ::，
     同网段的机器都能连（参考图里的「谁能访问」一列）。
     """
+    if IS_WINDOWS:
+        return listen_sockets_psutil()
     rows = []
     for path, is_v6 in (("/proc/net/tcp", False), ("/proc/net/tcp6", True)):
         try:
@@ -312,14 +349,8 @@ def listen_sockets():
                     except (IndexError, ValueError):
                         continue
                     addr = format_sockaddr(addr_hex, is_v6)
-                    if addr in ("0.0.0.0", "::"):
-                        scope = "局域网"
-                    elif addr.startswith("127.") or addr == "::1" or addr.endswith("127.0.0.1"):
-                        scope = "仅本机"
-                    else:
-                        scope = "其他"
                     rows.append({"port": port, "proto": "tcp6" if is_v6 else "tcp",
-                                 "addr": addr, "scope": scope})
+                                 "addr": addr, "scope": scope_of(addr)})
         except OSError:
             continue
     rows.sort(key=lambda item: item["port"])
@@ -327,8 +358,11 @@ def listen_sockets():
 
 
 def is_wireless_nic(name):
-    """Linux 命名约定：wl* 是无线网卡。"""
-    return (name or "").lower().startswith("wl")
+    """无线网卡识别：Linux 是 wl* 命名；Windows 的适配器名是「Wi-Fi / WLAN / 无线」。"""
+    low = (name or "").lower()
+    if low.startswith("wl"):
+        return True
+    return bool(re.search(r"(?i)wi-?fi|wlan|wireless|无线", name or ""))
 
 
 def parse_default_gateway(text):
@@ -382,7 +416,9 @@ def pick_nic():
 
 
 def listen_ports():
-    """从 /proc/net/tcp{,6} 读取 LISTEN 端口，免 root。"""
+    """监听中的端口集合：Linux 读 /proc/net/tcp{,6}，Windows 用 psutil。"""
+    if IS_WINDOWS:
+        return sorted({row["port"] for row in listen_sockets_psutil()})
     ports = set()
     for path in ("/proc/net/tcp", "/proc/net/tcp6"):
         try:
@@ -456,7 +492,8 @@ class Collector:
     """采样本机指标。进程 CPU、网速、功耗都靠两次采样求差分。"""
 
     def __init__(self):
-        self.disk_path = os.environ.get("DASHBOARD_DISK", "/")
+        default_disk = (os.environ.get("SystemDrive", "C:") + "\\") if IS_WINDOWS else "/"
+        self.disk_path = os.environ.get("DASHBOARD_DISK", default_disk)
         self.nic = pick_nic()
         self.cores = psutil.cpu_count(logical=True) or 1
         self.boot_time = psutil.boot_time()
@@ -689,18 +726,29 @@ class Collector:
             swap = psutil.swap_memory()
         except Exception as exc:
             return {"available": False, "reason": f"内存采样失败：{exc}"}
-        return {
+        # Windows 的 svmem 没有 buffers/cached/shared（那是 Linux 专有字段，直接访问会抛
+        # AttributeError 并把整轮采样打断）。这里按平台取字段：
+        #   「缓存」用 available - free 近似（Windows 的 standby 列表，语义接近 Linux 的 cached），
+        #    buffers/shared 在 Windows 上没有对应概念，如实给 0。
+        if IS_WINDOWS:
+            free_gb = vm.free / GIB
+            cached_gb = max(0.0, (vm.available / GIB) - free_gb)
+            extra = {"buffers_gb": 0.0, "cached_gb": round(cached_gb, 2), "shared_gb": 0.0}
+        else:
+            extra = {"buffers_gb": round(vm.buffers / GIB, 2),
+                     "cached_gb": round(vm.cached / GIB, 2),
+                     "shared_gb": round(vm.shared / GIB, 2)}
+        payload = {
             "available": True,
             "used_gb": round(used, 1),
             "total_gb": round(total, 1),
             "percent": round(used / total * 100, 1) if total else 0.0,
             "free_gb": round(vm.free / GIB, 1),
-            "buffers_gb": round(vm.buffers / GIB, 2),
-            "cached_gb": round(vm.cached / GIB, 2),
-            "shared_gb": round(vm.shared / GIB, 2),
             "swap_total_gb": round(swap.total / GIB, 1),
             "swap_used_gb": round(swap.used / GIB, 1),
         }
+        payload.update(extra)
+        return payload
 
     def _rapl_paths(self):
         """枚举 powercap 下的 RAPL 域。
@@ -976,10 +1024,15 @@ class Collector:
 
     @staticmethod
     def _load():
+        # 优先用 psutil：Windows 上 os.getloadavg() 根本不存在（AttributeError），
+        # 而 psutil.getloadavg() 在 Windows 上会自己模拟（>= 5.6.2）。
         try:
-            avg1, avg5, avg15 = os.getloadavg()
-        except OSError:
-            return {"available": False, "reason": "本机不支持负载查询"}
+            avg1, avg5, avg15 = psutil.getloadavg()
+        except (AttributeError, OSError):
+            try:
+                avg1, avg5, avg15 = os.getloadavg()
+            except (AttributeError, OSError):
+                return {"available": False, "reason": "本机不支持负载查询"}
         return {"available": True, "avg1": round(avg1, 2),
                 "avg5": round(avg5, 2), "avg15": round(avg15, 2)}
 
@@ -1315,7 +1368,7 @@ class Collector:
         low = (name or "").lower()
         if low == "lo":
             return "回环"
-        if low.startswith("wl"):
+        if low.startswith("wl") or re.search(r"(?i)wi-?fi|wlan|wireless|无线", name or ""):
             return "无线"
         if low.startswith(("docker", "br-", "veth", "virbr", "tun", "tap", "wg", "zt")):
             return "虚拟"

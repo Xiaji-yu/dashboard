@@ -1167,3 +1167,110 @@ class DiskRateCalculationTest(unittest.TestCase):
             out = collector._disk_io(1000.0)
         self.assertIsNone(out["read_bps"])
         self.assertIsNone(out["write_total_gb"])
+
+class WindowsCompatTest(unittest.TestCase):
+    """Windows 上不存在的 psutil 字段 / os 调用，必须在 Linux 上就能测出来。
+
+    实测教训：Windows 的 svmem 没有 buffers/cached/shared，直接访问会把每轮采样
+    都打断（日志刷「采样失败：'svmem' object has no attribute 'buffers'」）。
+    """
+
+    @staticmethod
+    def _svmem_without_linux_fields(total, available, free, used):
+        """Windows 的 svmem 只有这些字段（没有 buffers/cached/shared）。"""
+        return SimpleNamespace(total=total, available=available, percent=50.0,
+                               used=used, free=free)
+
+    def test_memory_on_windows_does_not_touch_linux_only_fields(self):
+        """模拟 Windows：svmem 只有 total/available/percent/used/free。"""
+        total = 16 * 1024 ** 3
+        available = 10 * 1024 ** 3
+        free = 6 * 1024 ** 3
+        fake = self._svmem_without_linux_fields(total, available, free, total - available)
+        collector = Collector.__new__(Collector)
+        with mock.patch("collector.IS_WINDOWS", True), \
+                mock.patch("psutil.virtual_memory", return_value=fake), \
+                mock.patch("psutil.swap_memory", return_value=SimpleNamespace(total=0, used=0)):
+            mem = collector._memory()
+        self.assertTrue(mem["available"], mem)
+        self.assertEqual(mem["total_gb"], 16.0)
+        self.assertEqual(mem["used_gb"], 6.0)
+        self.assertEqual(mem["free_gb"], 6.0)
+        self.assertEqual(mem["buffers_gb"], 0.0, "Windows 没有 buffers，如实给 0")
+        self.assertEqual(mem["cached_gb"], 4.0, "缓存用 available - free 近似")
+        self.assertEqual(mem["shared_gb"], 0.0)
+
+    def test_memory_on_linux_keeps_sysfs_values(self):
+        fake = SimpleNamespace(total=16 * 1024 ** 3, available=10 * 1024 ** 3,
+                               percent=50.0, used=6 * 1024 ** 3, free=4 * 1024 ** 3,
+                               buffers=512 * 1024 ** 2, cached=3 * 1024 ** 3,
+                               shared=256 * 1024 ** 2)
+        collector = Collector.__new__(Collector)
+        with mock.patch("collector.IS_WINDOWS", False), \
+                mock.patch("psutil.virtual_memory", return_value=fake), \
+                mock.patch("psutil.swap_memory", return_value=SimpleNamespace(total=0, used=0)):
+            mem = collector._memory()
+        self.assertEqual(mem["buffers_gb"], 0.5)
+        self.assertEqual(mem["cached_gb"], 3.0)
+        self.assertEqual(mem["shared_gb"], 0.25)
+
+    def test_load_works_when_os_getloadavg_is_missing(self):
+        """Windows 上 os.getloadavg 不存在（AttributeError），要走 psutil。"""
+        with mock.patch("psutil.getloadavg", return_value=(1.5, 1.0, 0.5)), \
+                mock.patch("os.getloadavg", side_effect=AttributeError("no getloadavg")):
+            load = Collector._load()
+        self.assertTrue(load["available"])
+        self.assertEqual(load["avg1"], 1.5)
+
+    def test_load_degrades_when_both_missing(self):
+        with mock.patch("psutil.getloadavg", side_effect=AttributeError), \
+                mock.patch("os.getloadavg", side_effect=AttributeError):
+            load = Collector._load()
+        self.assertFalse(load["available"])
+        self.assertIn("负载", load["reason"])
+
+    def test_scope_of(self):
+        from collector import scope_of
+        self.assertEqual(scope_of("0.0.0.0"), "局域网")
+        self.assertEqual(scope_of("::"), "局域网")
+        self.assertEqual(scope_of("127.0.0.1"), "仅本机")
+        self.assertEqual(scope_of("::1"), "仅本机")
+        self.assertEqual(scope_of("192.168.1.10"), "其他")
+
+    def test_listen_sockets_psutil_shape(self):
+        """Windows 用 psutil 枚举端口，字段要和 /proc 版一致。"""
+        import socket as socket_module
+        from collector import listen_sockets_psutil
+        conns = [
+            SimpleNamespace(status="LISTEN", pid=1, family=socket_module.AF_INET,
+                            laddr=SimpleNamespace(ip="0.0.0.0", port=8282)),
+            SimpleNamespace(status="LISTEN", pid=1, family=socket_module.AF_INET6,
+                            laddr=SimpleNamespace(ip="::1", port=8282)),
+            SimpleNamespace(status="ESTABLISHED", pid=1, family=socket_module.AF_INET,
+                            laddr=SimpleNamespace(ip="0.0.0.0", port=443)),
+            SimpleNamespace(status="LISTEN", pid=None, family=socket_module.AF_INET,
+                            laddr=None),
+        ]
+        with mock.patch("psutil.net_connections", return_value=conns):
+            rows = listen_sockets_psutil()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0], {"port": 8282, "proto": "tcp",
+                                   "addr": "0.0.0.0", "scope": "局域网"})
+        self.assertEqual(rows[1]["proto"], "tcp6")
+        self.assertEqual(rows[1]["scope"], "仅本机")
+
+    def test_listen_sockets_psutil_survives_failure(self):
+        from collector import listen_sockets_psutil
+        with mock.patch("psutil.net_connections", side_effect=OSError("boom")):
+            self.assertEqual(listen_sockets_psutil(), [])
+
+    def test_windows_wireless_names(self):
+        self.assertTrue(is_wireless_nic("Wi-Fi"))
+        self.assertTrue(is_wireless_nic("WLAN"))
+        self.assertTrue(is_wireless_nic("无线网络连接"))
+        self.assertTrue(is_wireless_nic("wlan0"))
+        self.assertFalse(is_wireless_nic("以太网"))
+        self.assertFalse(is_wireless_nic("Ethernet"))
+        self.assertEqual(Collector.interface_kind("Wi-Fi"), "无线")
+        self.assertEqual(Collector.interface_kind("以太网"), "有线")
+

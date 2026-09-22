@@ -572,6 +572,9 @@ def disk_static(mount=None):
     # 最后仍未知时，用型号/NVMe 这两条定义性证据兜底（绝不谎报机械盘）
     first["rotational"] = infer_rotational(first.get("model"), first.get("bus"),
                                            first.get("rotational"))
+    # 给 collector 的读写差分用：psutil 在 Windows 上按 "PhysicalDriveN" 命名计数器
+    if first.get("number") is not None:
+        first["block"] = f"PhysicalDrive{first['number']}"
     first.update({"available": True, "reason": None, "mounts": mounts_of_system()})
     return first
 
