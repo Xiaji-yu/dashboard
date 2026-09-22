@@ -60,6 +60,12 @@ def run_powershell(script, timeout=POWERSHELL_TIMEOUT):
     return interpret_output(done.returncode, done.stdout, done.stderr)
 
 
+# PowerShell 报「找不到命令/参数」时的特征串（中英文都覆盖）
+MISSING_COMMAND_HINTS = ("CommandNotFoundException", "is not recognized",
+                         "无法将", "不是内部或外部命令", "未被识别为", "找不到命令",
+                         "找不到与参数名称匹配", "A parameter cannot be found")
+
+
 def interpret_output(returncode, stdout, stderr):
     """子进程结果 -> 文本；None 表示这次查询失败（调用方降级为「不可用」）。
 
@@ -71,7 +77,8 @@ def interpret_output(returncode, stdout, stderr):
     if returncode != 0:
         return None
     stdout = stdout or ""
-    if not stdout.strip() and (stderr or "").strip():
+    error_text = stderr or ""
+    if not stdout.strip() and any(hint in error_text for hint in MISSING_COMMAND_HINTS):
         return None
     return stdout
 
@@ -291,7 +298,8 @@ def cpu_summary():
     import psutil
     payload = powershell_json(
         "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,"
-        "NumberOfLogicalProcessors,MaxClockSpeed | ConvertTo-Json -Compress")
+        "NumberOfLogicalProcessors,MaxClockSpeed,L2CacheSize,L3CacheSize,"
+        "VirtualizationFirmwareEnabled | ConvertTo-Json -Compress")
     row = parse_wmi_instance(payload) if payload else {}
     model = (row.get("Name") or "").strip() or platform.processor() or None
     min_mhz = None
@@ -315,17 +323,80 @@ def cpu_summary():
         "threads": psutil.cpu_count(logical=True),
         "min_mhz": min_mhz,
         "max_mhz": max_mhz,
-        "cache_text": None,
-        "virtualization": None,
+        # Win32_Processor 的 L2/L3 单位是 KB，拼成与 Linux 版同风格的文本
+        "cache_text": format_cpu_cache(row.get("L2CacheSize"), row.get("L3CacheSize")),
+        # VirtualizationFirmwareEnabled 的语义是「固件里开着虚拟化」，
+        # 只有为 True 时才有正面信息可报（False 通常只是没开 Hyper-V，不代表 CPU 不支持）
+        "virtualization": "已启用" if row.get("VirtualizationFirmwareEnabled") is True else None,
         "reason": None if (model or payload) else "WMI 查询失败",
     }
 
 
 # MSFT_PhysicalDisk.MediaType：3=HDD、4=SSD、5=SCM；其它值一律当作未知（不猜）
-DISK_MEDIA = {3: True, 4: False, 5: None}
-# MSFT_BusType 里我有把握的部分；其它值返回 None，宁可显示未知也不写错
-DISK_BUS = {1: "SCSI", 3: "ATA", 4: "1394", 6: "FC", 7: "SAS", 8: "SATA",
-            11: "虚拟", 14: "NVMe", 15: "SCM"}
+DISK_MEDIA_NUM = {3: True, 4: False, 5: None}
+DISK_MEDIA_NAME = {"HDD": True, "SSD": False, "SCM": None,
+                   "UNSPECIFIED": None, "UNKNOWN": None}
+# MSFT_BusType：有把握的部分；其它值返回 None，宁可显示未知也不写错
+DISK_BUS_NUM = {1: "SCSI", 3: "ATA", 4: "1394", 6: "FC", 7: "SAS", 8: "SATA",
+                11: "虚拟", 14: "NVMe", 15: "SCM"}
+DISK_BUS_NAME = {"SCSI": "SCSI", "ATA": "ATA", "SATA": "SATA", "SAS": "SAS", "NVME": "NVMe",
+                 "RAID": "RAID", "USB": "USB", "VIRTUAL": "虚拟", "FILEBACKEDVIRTUAL": "虚拟",
+                 "STORAGESPACES": "存储空间", "SCM": "SCM", "FC": "FC", "1394": "1394",
+                 "UNSPECIFIED": None, "UNKNOWN": None}
+
+
+def enum_number(value):
+    """把枚举值统一成整数：PowerShell 有时给数字、有时给数字字符串（拿不准返回 None）。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        return int(text) if text.isdigit() else None
+    return None
+
+
+def disk_media(value):
+    """MediaType -> 是否机械盘。数字与枚举名（SSD/HDD）都能认，认不出返回 None。"""
+    number = enum_number(value)
+    if number is not None and number in DISK_MEDIA_NUM:
+        return DISK_MEDIA_NUM[number]
+    if isinstance(value, str):
+        return DISK_MEDIA_NAME.get(value.strip().upper())
+    return None
+
+
+def disk_bus(value):
+    """BusType -> 可读总线名。数字与枚举名都能认，认不出返回 None。"""
+    number = enum_number(value)
+    if number is not None and number in DISK_BUS_NUM:
+        return DISK_BUS_NUM[number]
+    if isinstance(value, str):
+        return DISK_BUS_NAME.get(value.strip().upper())
+    return None
+
+
+def to_mb(kb):
+    """KB -> MB（Win32_Processor 的缓存单位是 KB）。"""
+    try:
+        value = int(kb)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    mb = value / 1024
+    return int(mb) if mb == int(mb) else round(mb, 1)
+
+
+def format_cpu_cache(l2_kb, l3_kb):
+    """拼成与 Linux 版同风格的缓存文本，例如 L2 20 MB · L3 24 MB。"""
+    parts = []
+    for label, value in (("L2", l2_kb), ("L3", l3_kb)):
+        mb = to_mb(value)
+        if mb:
+            parts.append(f"{label} {mb} MB")
+    return " · ".join(parts) or None
 
 
 def to_gb(value):
@@ -355,8 +426,8 @@ def disk_rows_from_storage(payload):
             "device": f"磁盘 {number}" if number is not None else None,
             "model": clean_text(item.get("FriendlyName")),
             "size_gb": to_gb(item.get("Size")),
-            "rotational": DISK_MEDIA.get(item.get("MediaType")),
-            "bus": DISK_BUS.get(item.get("BusType")),
+            "rotational": disk_media(item.get("MediaType")),
+            "bus": disk_bus(item.get("BusType")),
         })
     return [row for row in rows if row["model"] or row["size_gb"]]
 
@@ -399,13 +470,15 @@ def disk_static(mount=None):
     if letter:
         rows = disk_rows_from_storage(powershell_json(
             f"Get-Partition -DriveLetter {letter} -ErrorAction SilentlyContinue | "
-            "Get-Disk | Select-Object Number,FriendlyName,BusType,MediaType,Size | "
-            "ConvertTo-Json -Compress"))
+            "Get-Disk | Select-Object Number,FriendlyName,Size,"
+            "@{n='MediaType';e={$_.MediaType.ToString()}},"
+            "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
     if not rows:
         rows = disk_rows_from_storage(powershell_json(
             "Get-Disk -ErrorAction SilentlyContinue | "
-            "Select-Object Number,FriendlyName,BusType,MediaType,Size | "
-            "ConvertTo-Json -Compress"))
+            "Select-Object Number,FriendlyName,Size,"
+            "@{n='MediaType';e={$_.MediaType.ToString()}},"
+            "@{n='BusType';e={$_.BusType.ToString()}} | ConvertTo-Json -Compress"))
     if not rows:
         rows = disk_rows_from_wmi(powershell_json(
             "Get-CimInstance Win32_DiskDrive | Select-Object Model,Size,MediaType,"
@@ -457,10 +530,21 @@ def filter_usb_instances(payload):
     return rows
 
 
+def is_usb_hub(name, instance):
+    """USB 集线器判定。
+
+    Windows 没有 Linux 的 1d6b 厂商 ID，按名字与 InstanceId 识别：
+    根集线器（ROOT_HUB30）、以及「通用 USB 集线器」这类主板/机箱内的集线器。
+    集线器不算「外接设备」，这样计数才等于真正插上去的东西。
+    """
+    return ("ROOT_HUB" in (instance or "").upper()
+            or bool(re.search(r"(?i)root hub|集线器|\bhub\b", name or "")))
+
+
 def usb_devices():
     """USB 设备（Get-PnpDevice -Class USB）。输出与 Linux 版同形。"""
     payload = powershell_json(
-        "Get-PnpDevice -PresentOnly -Class USB | "
+        "Get-PnpDevice -PresentOnly -Class USB -ErrorAction SilentlyContinue | "
         "Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress")
     if payload is None:
         return {"available": False, "reason": "PowerShell 查询失败（Get-PnpDevice）", "list": []}
@@ -470,8 +554,7 @@ def usb_devices():
         instance = (item.get("InstanceId") or "").strip()
         if not name and not instance:
             continue
-        # Windows 侧没有 Linux 的 1d6b 厂商 ID；根集线器用名字/InstanceId 识别
-        hub = "ROOT_HUB" in instance.upper() or bool(re.search(r"(?i)root hub", name))
+        hub = is_usb_hub(name, instance)
         rows.append({"id": instance or None, "vendor": None, "product": name or instance,
                      "bus": None, "device": None, "hub": hub})
     rows.sort(key=lambda row: (row["hub"], row["product"] or ""))
@@ -483,7 +566,7 @@ def usb_devices():
 def bluetooth_devices():
     """蓝牙适配器与已配对设备（Get-PnpDevice -Class Bluetooth）。"""
     payload = powershell_json(
-        "Get-PnpDevice -PresentOnly -Class Bluetooth | "
+        "Get-PnpDevice -PresentOnly -Class Bluetooth -ErrorAction SilentlyContinue | "
         "Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress")
     if payload is None:
         return {"available": False, "reason": "PowerShell 查询失败（Get-PnpDevice）",

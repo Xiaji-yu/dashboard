@@ -10,10 +10,12 @@ import unittest
 from unittest import mock
 
 import platform_win
-from platform_win import (clean_text, disk_rows_from_storage, disk_rows_from_wmi, drive_letter,
-                          filter_usb_instances, interpret_output, parse_arp, parse_netsh_ssid,
-                          parse_ping_alive, parse_pnp_devices, parse_services,
-                          parse_wmi_instance, to_gb)
+from platform_win import (clean_text, disk_bus, disk_media, disk_rows_from_storage,
+                          disk_rows_from_wmi, drive_letter, enum_number,
+                          filter_usb_instances, format_cpu_cache, interpret_output,
+                          is_usb_hub, parse_arp, parse_netsh_ssid, parse_ping_alive,
+                          parse_pnp_devices, parse_services, parse_wmi_instance,
+                          to_gb, to_mb)
 
 ARP_TEXT = """
 接口: 192.168.1.111 --- 0x5
@@ -193,8 +195,83 @@ class PowershellEncodingTest(unittest.TestCase):
         self.assertEqual(interpret_output(0, "ok", ""), "ok")
         self.assertEqual(interpret_output(0, "", ""), "", "成功但无对象 -> 空字符串")
         self.assertIsNone(interpret_output(1, "ok", ""), "非零退出码 -> 失败")
-        self.assertIsNone(interpret_output(0, "", "Get-PnpDevice 无法识别"),
-                          "没输出且有报错 -> 失败，别误报成没有设备")
+        self.assertIsNone(interpret_output(0, "", "无法将该项识别为 cmdlet"),
+                          "命令不存在 -> 失败，别误报成没有设备")
+        self.assertEqual(interpret_output(0, "", "找不到蓝牙类"), "",
+                         "仅类目不存在 -> 当作「没有这类设备」")
+
+
+class DiskEnumTest(unittest.TestCase):
+    """实测教训：Get-Disk 的枚举值在不同 PowerShell 上可能是数字、数字字符串或枚举名。
+
+    第二轮实测里 rotational/bus 都是 null，就是因为只按数字查表。
+    """
+
+    def test_enum_number(self):
+        self.assertEqual(enum_number(4), 4)
+        self.assertEqual(enum_number("4"), 4)
+        self.assertIsNone(enum_number("SSD"))
+        self.assertIsNone(enum_number(None))
+        self.assertIsNone(enum_number(True), )
+        self.assertIsNone(enum_number(4.5))
+
+    def test_disk_media_all_forms(self):
+        for value in (4, "4", "SSD", "ssd"):
+            self.assertFalse(disk_media(value), f"{value!r} 应是固态")
+        for value in (3, "3", "HDD"):
+            self.assertTrue(disk_media(value), f"{value!r} 应是机械")
+        for value in (0, 5, "UNKNOWN", "SCM", None, "", "??"):
+            self.assertIsNone(disk_media(value), f"{value!r} 应判为未知")
+
+    def test_disk_bus_all_forms(self):
+        self.assertEqual(disk_bus(8), "SATA")
+        self.assertEqual(disk_bus("8"), "SATA")
+        self.assertEqual(disk_bus("SATA"), "SATA")
+        self.assertEqual(disk_bus("NVMe"), "NVMe")
+        self.assertEqual(disk_bus(14), "NVMe")
+        self.assertEqual(disk_bus(11), "虚拟")
+        self.assertIsNone(disk_bus(99))
+        self.assertIsNone(disk_bus("UNKNOWN"))
+        self.assertIsNone(disk_bus(None))
+
+    def test_storage_rows_accept_string_enums(self):
+        """PowerShell 端用 .ToString() 后，这里必须照样认得。"""
+        rows = disk_rows_from_storage([{"Number": 0, "FriendlyName": "SSD 1TB",
+                                        "BusType": "NVMe", "MediaType": "SSD",
+                                        "Size": "1024209543168"}])
+        self.assertFalse(rows[0]["rotational"])
+        self.assertEqual(rows[0]["bus"], "NVMe")
+
+    def test_to_mb_and_cache_text(self):
+        self.assertEqual(to_mb(20480), 20)
+        self.assertEqual(to_mb(1536), 1.5)
+        self.assertIsNone(to_mb(0))
+        self.assertIsNone(to_mb("x"))
+        self.assertEqual(format_cpu_cache(20480, 24576), "L2 20 MB · L3 24 MB")
+        self.assertEqual(format_cpu_cache(20480, 0), "L2 20 MB")
+        self.assertIsNone(format_cpu_cache(None, None))
+
+    def test_hub_detection(self):
+        """实测：VID_05E3 的三个「通用 USB 集线器」不该算外接设备（external 7 -> 4）。"""
+        self.assertTrue(is_usb_hub("USB 根集线器(USB 3.0)", "USB\\ROOT_HUB30\\4&11FD050C&0&0"))
+        self.assertTrue(is_usb_hub("通用 SuperSpeed USB 集线器", "USB\\VID_05E3&PID_0620\\5&2A"))
+        self.assertTrue(is_usb_hub("Generic USB Hub", "USB\\VID_05E3&PID_0608\\5&2A"))
+        self.assertFalse(is_usb_hub("G502 HERO", "USB\\VID_046D&PID_C08B\\1194"))
+        self.assertFalse(is_usb_hub("USB 大容量存储设备", "USB\\VID_1F75&PID_0903\\0000"))
+        self.assertFalse(is_usb_hub("USB Composite Device", "USB\\VID_3837&PID_3028\\554A"))
+
+
+class InterpretOutputTest(unittest.TestCase):
+    """空输出 + 报错时，要区分「类目不存在」与「命令不存在」。"""
+
+    def test_class_not_found_is_not_a_failure(self):
+        self.assertEqual(interpret_output(0, "", "Get-PnpDevice: 找不到蓝牙类"), "")
+
+    def test_command_not_found_is_a_failure(self):
+        for stderr in ("Get-PnpDevice : 无法将该项识别为 cmdlet",
+                       "Get-PnpDevice : The term 'Get-PnpDevice' is not recognized",
+                       "CommandNotFoundException"):
+            self.assertIsNone(interpret_output(0, "", stderr), stderr)
 
 
 if __name__ == "__main__":

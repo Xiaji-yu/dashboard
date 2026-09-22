@@ -80,7 +80,7 @@ cd C:\path\\to\dashboard
 前提：`python -m pip install psutil` 已装好（缺它会直接 `ModuleNotFoundError`，
 现在导入 `platform_win` 时会给出这句人话提示）。
 
-**修完 5 个问题后请再跑一次这条**，确认中文正常、SSD 显示固态、USB 不再有控制器：
+**再跑一次这条**，确认枚举、集线器、缓存都对上：
 
 ```powershell
 git pull
