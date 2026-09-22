@@ -60,6 +60,40 @@ cd C:\path\\to\dashboard
 等价 Linux 的 root：能读到全部进程与端口归属。想降权用
 `.\install-windows.ps1 -User ".\普通用户"`（会要求密码，并需要「作为服务登录」权限）。
 
+## 打包成 exe（目标机器不用装 Python）
+
+```powershell
+cd deploy
+.\build-exe.ps1                # 单文件：dist\dashboard.exe
+.\build-exe.ps1 -Onedir        # 目录版：启动更快、杀软误报更少
+.\build-exe.ps1 -NoConsole     # 无控制台窗口
+```
+
+产物可直接拷到别的 Windows 机器上双击运行，**不需要 Python 或 psutil**。
+构建期才会装 PyInstaller（`python -m pip install pyinstaller`），不算项目依赖。
+
+打包后会遇到、代码里已经处理好的两件事：
+
+| 坑 | 处理 |
+| --- | --- |
+| onefile 的 `__file__` 指向临时解包目录，**退出即删** | `runtime.resource_dir()` 读 `sys._MEIPASS` 找 static/；`runtime.data_dir()` 把 `auth.json`/`probes.json`/日志放到 **exe 同目录**，不可写时退回 `%LOCALAPPDATA%\dashboard` |
+| 无控制台版本看不到初始账号密码 | 首次生成凭据时写入 `初始账号-登录后请删除.txt` 并弹一次消息框（`runtime.announce_initial_credentials`） |
+
+其它注意：
+
+- **保留控制台**（默认）时初始密码直接打在窗口里，最省事；`-NoConsole` 才有上面的文件+弹窗兜底。
+- **杀软误报**是 PyInstaller 单文件版的常见问题，介意就用 `-Onedir` 或做代码签名。
+- 单文件版每次启动会自我解包到临时目录，首启慢 1~2 秒；目录版没有这一步。
+- 环境变量照常生效（`DASHBOARD_PORT` / `DASHBOARD_HOST` / `DASHBOARD_DISK` / `DASHBOARD_TRUST_PROXY` …）。
+- 打包版仍会用系统自带的 PowerShell / netsh / arp 取设备与局域网信息；容器面板需要 Docker Desktop。
+
+装成服务（管理员 PowerShell，指向 exe 即可，目标机器同样不需要 Python）：
+
+```powershell
+cd deploy
+.\install-windows.ps1 -ExePath "D:\dist\dashboard.exe"
+```
+
 ## 能力对照表
 
 | 页面/指标 | Windows 下的来源 | 状态 |

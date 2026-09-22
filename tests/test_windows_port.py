@@ -173,9 +173,11 @@ class PowerShellScriptEncodingTest(unittest.TestCase):
     """
 
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    SCRIPTS = ("run.ps1", os.path.join("deploy", "install-windows.ps1"))
+    SCRIPTS = ("run.ps1", os.path.join("deploy", "install-windows.ps1"),
+               os.path.join("deploy", "build-exe.ps1"))
     # 每个脚本里的一个特征串，确认解码后内容完整（不是乱码）
-    MARKERS = {"run.ps1": "$Action", "install-windows.ps1": "-Remove"}
+    MARKERS = {"run.ps1": "$Action", "install-windows.ps1": "-Remove",
+               "build-exe.ps1": "PyInstaller"}
 
     def test_scripts_have_utf8_bom(self):
         for name in self.SCRIPTS:

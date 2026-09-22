@@ -23,6 +23,8 @@ import shutil
 import threading
 import time
 
+from runtime import data_dir
+
 PBKDF2_ROUNDS = 200_000
 SESSION_TTL = 7 * 24 * 3600      # 会话有效期：7 天
 MAX_SESSIONS = 20                # 最多保留的会话数，超出淘汰最旧的
@@ -118,6 +120,7 @@ class AuthStore:
         self._failures = {}          # ip -> [失败时间戳]
         self._last_save = 0.0        # 上次落盘时间（session / token 刷新节流用）
         self._token_env_seeded = False
+        self.initial_credentials = None      # 本次启动新建凭据时记下 (user, secret)
         self.data = {}
         self._load_or_create(username, password)
 
@@ -171,6 +174,7 @@ class AuthStore:
             "updated_at": time.time(),
             "sessions": {},
         }
+        self.initial_credentials = (user, secret)
         self._save()
         self.logger(f"[auth] 首次启动，已生成初始账号：{user} / {secret}")
         self.logger(f"[auth] 凭据文件：{self.path}（权限 600，已加入 .gitignore；登录后请自行修改密码）")
@@ -438,6 +442,10 @@ class AuthStore:
 
 
 def auth_file_path():
-    """凭据文件路径（DASHBOARD_AUTH_FILE 可覆盖，默认项目根目录 auth.json）。"""
+    """凭据文件路径（DASHBOARD_AUTH_FILE 可覆盖）。
+
+    默认在**可写数据目录**：源码运行时是项目根目录；打包成 exe 后是 exe 所在目录
+    （onefile 的解包目录退出即删，写在那里会丢账号）。
+    """
     return os.environ.get("DASHBOARD_AUTH_FILE") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "auth.json")
+        data_dir(), "auth.json")

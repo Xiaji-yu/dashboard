@@ -1168,6 +1168,26 @@ class DiskRateCalculationTest(unittest.TestCase):
         self.assertIsNone(out["read_bps"])
         self.assertIsNone(out["write_total_gb"])
 
+class BatteryClampTest(unittest.TestCase):
+    """实测：个别固件满电时报出 >100%（本机见过 121.7%），必须钳住而不是照实显示。"""
+
+    def test_percent_is_clamped(self):
+        batt = SimpleNamespace(percent=121.7, power_plugged=True, secsleft=-1)
+        payload = battery_payload(batt, [])
+        self.assertEqual(payload["percent"], 100.0)
+
+        batt = SimpleNamespace(percent=-3.0, power_plugged=False, secsleft=-1)
+        self.assertEqual(battery_payload(batt, [])["percent"], 0.0)
+
+    def test_normal_percent_untouched(self):
+        batt = SimpleNamespace(percent=94.7, power_plugged=True, secsleft=-1)
+        self.assertEqual(battery_payload(batt, [])["percent"], 94.7)
+
+    def test_missing_percent_stays_none(self):
+        batt = SimpleNamespace(percent=None, power_plugged=False, secsleft=-1)
+        self.assertIsNone(battery_payload(batt, [])["percent"])
+
+
 class WindowsCompatTest(unittest.TestCase):
     """Windows 上不存在的 psutil 字段 / os 调用，必须在 Linux 上就能测出来。
 

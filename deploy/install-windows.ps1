@@ -17,21 +17,29 @@ param(
     [switch]$Remove,
     [string]$User = "",
     [string]$Name = "dashboard",
-    [string]$DisplayName = "8282 总控台（本机实时监控看板）"
+    [string]$DisplayName = "8282 总控台（本机实时监控看板）",
+    # 打包成 exe 时传它的路径，例如 .\install-windows.ps1 -ExePath "D:\dist\dashboard.exe"
+    # 这样目标机器不需要装 Python；数据文件落在 exe 同目录（或 %LOCALAPPDATA%\dashboard）
+    [string]$ExePath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $Dir = Split-Path -Parent $PSScriptRoot
-$Python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $Python) {
-    throw "找不到 python 命令；先装 Python 3.9+（安装时勾选 Add python.exe to PATH）"
+if ($ExePath) {
+    if (-not (Test-Path $ExePath)) { throw "找不到 exe：$ExePath" }
+    # 直接注册打包好的 exe：目标机器不需要 Python
+    $BinPath = "`"$ExePath`""
+} else {
+    $Python = (Get-Command python -ErrorAction SilentlyContinue).Source
+    if (-not $Python) {
+        throw "找不到 python 命令；先装 Python 3.9+（安装时勾选 Add python.exe to PATH），或用 -ExePath 指向打包好的 exe"
+    }
+    python -c "import psutil" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "缺少依赖 psutil，请先执行：  python -m pip install psutil"
+    }
+    $BinPath = "`"$Python`" `"$Dir\server.py`""
 }
-python -c "import psutil" 2>$null
-if ($LASTEXITCODE -ne 0) {
-    throw "缺少依赖 psutil，请先执行：  python -m pip install psutil"
-}
-
-$BinPath = "`"$Python`" `"$Dir\server.py`""
 
 if ($Remove) {
     sc.exe stop $Name | Out-Null

@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 from auth import (MAX_TOKENS, SESSION_TTL, AuthConfigError, AuthStore, auth_file_path)
+from runtime import announce_initial_credentials, data_dir, is_frozen, resource_dir
 from collector import Collector
 from history import History, WINDOW_SECONDS
 
@@ -87,7 +88,9 @@ def client_ip(headers, peer, trust=False):
     return peer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+# 静态资源必须走 resource_dir()：打包成 onefile exe 后它们是解包到临时目录的，
+# 用 __file__ 拼路径会指向不存在的目录
+STATIC_DIR = os.path.join(resource_dir(), "static")
 HOST = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DASHBOARD_PORT", "8282"))
 INTERVAL = float(os.environ.get("DASHBOARD_INTERVAL", "1.0"))
@@ -658,6 +661,12 @@ def main():
     except AuthConfigError as exc:
         # 凭据读不到或损坏时宁可不启动，也不能静默重建覆盖原账号
         raise SystemExit(f"凭据不可用，服务未启动：\n{exc}")
+    # 打包成无控制台的 exe 时，初始凭据看不到控制台输出：写文件 + 弹窗
+    if is_frozen() and auth_store.initial_credentials:
+        user, secret = auth_store.initial_credentials
+        written = announce_initial_credentials(user, secret, data_dir())
+        if written:
+            print(f"[auth] 初始凭据已写入：{written}", flush=True)
     auth_store.seed_env_token()
     collector = Collector()
     threading.Thread(target=sampler, args=(collector,), daemon=True).start()

@@ -39,7 +39,8 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 - **跨平台**：后端 `psutil` + 标准库；Linux 走 `/proc`、`/sys`、`systemctl`，Windows 走
   PowerShell(`ConvertTo-Json`) + `netsh` + `arp` 取同等真实数据（`platform_win.py`，15 处分派点，
   前端零改动）。拿不到的（Windows 上的温度/风扇/整机功耗/核显频率）如实显示「不可用」。
-  详见 [docs/windows.md](docs/windows.md)。
+  详见 [docs/windows.md](docs/windows.md)；也能用 `deploy/build-exe.ps1` 打包成
+  **免装 Python 的 exe**（资源与可写数据分离、无控制台时用文件+弹窗提示初始密码）。
 - **有测试**：66 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 8 个前端图表用例
   守住曲线绘制；CI 里跑 ruff + 两套测试 + 接口冒烟。
 

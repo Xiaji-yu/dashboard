@@ -7,6 +7,17 @@
 
 ### 新增
 
+- **支持打包成 Windows exe**（`deploy/build-exe.ps1` + `runtime.py`）：目标机器无需 Python/psutil。
+  - `runtime.py` 区分**只读资源**与**可写数据**：打包后 static/ 走 `sys._MEIPASS`，
+    而 `auth.json`/`probes.json`/日志落在 exe 同目录（不可写时退回 `%LOCALAPPDATA%\dashboard`）——
+    onefile 的解包目录退出即删，写在那里会丢账号；
+  - 无控制台版本看不到初始账号密码，因此首次生成凭据时会写入
+    `初始账号-登录后请删除.txt` 并弹一次 Windows 消息框；
+  - 构建脚本支持 `-Onedir`（启动更快、杀软误报更少）与 `-NoConsole`，
+    并顺手在产物目录放 `使用说明.txt` 与 `probes.json` 样例；
+  - `deploy/install-windows.ps1` 新增 `-ExePath`，可把 exe 直接注册成服务；
+  - 新增 `tests/test_runtime.py`（14 例）：打桩 `sys.frozen`/`_MEIPASS`/`sys.executable`
+    就能在没有 Windows 的机器上验证上述路径逻辑。
 - **Windows 移植**（`platform_win.py` + 15 处平台分派）：主机信息改用 PowerShell
   (`Win32_OperatingSystem`/`Win32_ComputerSystem`/`Win32_BIOS`/`Win32_Processor`/`Win32_DiskDrive`)，
   USB/蓝牙用 `Get-PnpDevice`，系统服务用 `Get-Service`（前端卡片标题随之切换），

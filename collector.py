@@ -20,6 +20,8 @@ import time
 
 import psutil
 
+from runtime import data_dir
+
 # 虚拟网卡前缀：网速默认只统计物理网卡，避免 docker 内部流量污染曲线
 VIRTUAL_NIC_PREFIXES = (
     "lo", "docker", "br-", "veth", "virbr", "tun", "tap", "wg", "zt",
@@ -276,9 +278,11 @@ def format_khz(khz):
 
 
 def probes_path():
-    """远程探测目标配置文件（可用 DASHBOARD_PROBES 指向别处）。"""
-    return os.environ.get("DASHBOARD_PROBES") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "probes.json")
+    """远程探测目标配置文件（可用 DASHBOARD_PROBES 指向别处）。
+
+    默认在可写数据目录（打包成 exe 后是 exe 所在目录，见 runtime.data_dir）。
+    """
+    return os.environ.get("DASHBOARD_PROBES") or os.path.join(data_dir(), "probes.json")
 
 
 def format_sockaddr(addr_hex, is_v6):
@@ -484,7 +488,12 @@ def battery_payload(batt, supplies):
     secsleft = None
     if not plugged and isinstance(batt.secsleft, int) and 0 < batt.secsleft < 86400 * 30:
         secsleft = int(batt.secsleft)
-    return {"available": True, "percent": round(batt.percent, 1), "plugged": plugged,
+    # 个别固件在满电附近会给出 >100%（energy_now 略高于 energy_full，实测见过 121.7%），
+    # 页面上显示 121.7% 只会让人困惑，这里钳到 0–100。
+    percent = None
+    if batt.percent is not None:
+        percent = round(max(0.0, min(100.0, float(batt.percent))), 1)
+    return {"available": True, "percent": percent, "plugged": plugged,
             "status": status, "cycles": cycles, "power_w": power_w, "secsleft": secsleft}
 
 
