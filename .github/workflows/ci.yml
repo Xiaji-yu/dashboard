@@ -41,7 +41,19 @@ jobs:
         run: ruff check .
 
       - name: 单元测试
-        run: python -m unittest discover -v
+        run: |
+          set -o pipefail
+          python -m unittest discover -v 2>&1 | tee unit-tests.log
+
+      # 作业日志要管理员权限才能下载；把失败点写进 check 注解，任何人都能看到
+      - name: 失败摘要（写进 check 注解）
+        if: failure()
+        run: |
+          summary=$(grep -E "^(FAIL|ERROR):" -A 8 unit-tests.log | head -60 | sed ':a;N;$!ba;s/\n/%0A/g')
+          if [ -z "$summary" ]; then
+            summary=$(tail -30 unit-tests.log | sed ':a;N;$!ba;s/\n/%0A/g')
+          fi
+          echo "::error title=单元测试失败::${summary}"
 
       - name: 启动服务并冒烟测试
         run: |
