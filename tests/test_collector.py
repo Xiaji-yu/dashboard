@@ -1168,6 +1168,55 @@ class DiskRateCalculationTest(unittest.TestCase):
         self.assertIsNone(out["read_bps"])
         self.assertIsNone(out["write_total_gb"])
 
+class InterfaceShapeTest(unittest.TestCase):
+    """CI 实测：runner 上的 lo / 未配置接口没有 IPv4，字段时有时无会让取数方被迫写分支。
+
+    接口条目的字段集合必须稳定：没有地址就是 None，而不是整个键消失。
+    """
+
+    def _interfaces_with(self, addrs):
+        collector = Collector.__new__(Collector)
+        stats = {"lo": SimpleNamespace(isup=True, speed=0, duplex=0, mtu=65536),
+                 "eth0": SimpleNamespace(isup=True, speed=1000, duplex=2, mtu=1500)}
+        with mock.patch("psutil.net_if_stats", return_value=stats), \
+                mock.patch("psutil.net_if_addrs", return_value=addrs), \
+                mock.patch.object(Collector, "interface_kind",
+                                  side_effect=lambda name: "回环" if name == "lo" else "有线"):
+            return collector._interfaces()
+
+    def test_fields_are_stable_without_ipv4(self):
+        addrs = {"lo": [SimpleNamespace(family=socket.AF_INET, address="127.0.0.1",
+                                        netmask="255.0.0.0")],
+                 # eth0 只有 MAC、没有 IP（CI runner 上很常见）
+                 "eth0": [SimpleNamespace(family=psutil.AF_LINK,
+                                          address="0a:1b:2c:3d:4e:5f")]}
+        result = self._interfaces_with(addrs)
+        keys = {frozenset(item) for item in result["physical"]}
+        self.assertEqual(len(keys), 1, f"所有接口的字段集合应当一致，实际 {keys}")
+        expected = {"name", "kind", "up", "speed_mbps", "mtu",
+                    "ipv4", "ipv6", "mac", "wireless"}
+        self.assertEqual(keys.pop(), expected)
+        by_name = {item["name"]: item for item in result["physical"]}
+        self.assertEqual(by_name["lo"]["ipv4"], "127.0.0.1")
+        self.assertIsNone(by_name["eth0"]["ipv4"], "没有 IP 时给 None，而不是缺键")
+        self.assertEqual(by_name["eth0"]["mac"], "0a:1b:2c:3d:4e:5f")
+        self.assertIsNone(by_name["eth0"]["wireless"], "非无线接口 wireless 为 None")
+
+    def test_wireless_interface_keeps_shape(self):
+        addrs = {"lo": [], "eth0": []}
+        collector = Collector.__new__(Collector)
+        with mock.patch.object(Collector, "interface_kind", return_value="无线"), \
+                mock.patch.object(Collector, "_wireless_info",
+                                  return_value={"ssid": "MyWiFi", "signal": 88}), \
+                mock.patch("psutil.net_if_stats",
+                           return_value={"eth0": SimpleNamespace(isup=True, speed=0,
+                                                                 duplex=0, mtu=1500)}), \
+                mock.patch("psutil.net_if_addrs", return_value=addrs):
+            result = collector._interfaces()
+        self.assertEqual(result["physical"][0]["wireless"],
+                         {"ssid": "MyWiFi", "signal": 88})
+
+
 class BatteryClampTest(unittest.TestCase):
     """实测：个别固件满电时报出 >100%（本机见过 121.7%），必须钳住而不是照实显示。"""
 

@@ -1481,12 +1481,15 @@ class Collector:
         physical, virtual = [], []
         for name in sorted(stats):
             kind = self.interface_kind(name)
+            # 形状稳定：没有地址/不是无线也给 None，别让字段时有时无
+            # （CI runner 上的 lo、未配置接口就没有 IPv4，取数方不该为此写分支）
             info = {"name": name, "kind": kind, "up": bool(stats[name].isup),
-                    "speed_mbps": stats[name].speed or None, "mtu": stats[name].mtu}
+                    "speed_mbps": stats[name].speed or None, "mtu": stats[name].mtu,
+                    "ipv4": None, "ipv6": None, "mac": None, "wireless": None}
             for addr in addrs.get(name, []):
                 if addr.family == socket.AF_INET:
                     info["ipv4"] = addr.address
-                elif addr.family == socket.AF_INET6 and not info.get("ipv6"):
+                elif addr.family == socket.AF_INET6 and not info["ipv6"]:
                     info["ipv6"] = addr.address.split("%")[0]
                 elif addr.family == psutil.AF_LINK:
                     info["mac"] = addr.address
@@ -1854,6 +1857,7 @@ class Collector:
 
     def _collect_services(self):
         items = []
+        # 形状稳定：每条都带 groupNote（没有补充说明就是 None）
         containers, docker_note = self._docker_containers()
         if docker_note:
             items.append({"group": "容器", "name": "Docker", "status": "unknown",
@@ -1888,6 +1892,8 @@ class Collector:
         if load["available"]:
             items.append({"group": "健康", "name": "系统负载", "status": "ok",
                           "detail": f"{load['avg1']} / {load['avg5']} / {load['avg15']}"})
+        for item in items:                     # 统一补上可选字段，保证字段集合稳定
+            item.setdefault("groupNote", None)
         return items
 
     def _docker_containers(self, limit=4):

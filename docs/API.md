@@ -148,11 +148,11 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `memory.total_gb` | float | 内存总量（GB） |
 | `memory.percent` | float | 内存占用率（0–100） |
 | `memory.free_gb` | float | 空闲（GB） |
+| `memory.swap_total_gb` | float | 交换区总量（GB） |
+| `memory.swap_used_gb` | float | 交换区已用（GB） |
 | `memory.buffers_gb` | float | 内核缓冲（GB） |
 | `memory.cached_gb` | float | 页缓存（GB） |
 | `memory.shared_gb` | float | 共享内存（GB） |
-| `memory.swap_total_gb` | float | 交换区总量（GB） |
-| `memory.swap_used_gb` | float | 交换区已用（GB） |
 | `power.available` | bool | available（布尔） |
 | `power.watts` | float | 功耗（瓦）；主值优先取最接近整机的域 |
 | `power.source` | str | 主值来自哪个域（如「CPU 封装」） |
@@ -227,11 +227,11 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `performance.memory.total_gb` | float | total_gb（GB） |
 | `performance.memory.percent` | float | percent（%） |
 | `performance.memory.free_gb` | float | free_gb（GB） |
+| `performance.memory.swap_total_gb` | float | swap_total_gb（GB） |
+| `performance.memory.swap_used_gb` | float | swap_used_gb（GB） |
 | `performance.memory.buffers_gb` | float | buffers_gb（GB） |
 | `performance.memory.cached_gb` | float | cached_gb（GB） |
 | `performance.memory.shared_gb` | float | shared_gb（GB） |
-| `performance.memory.swap_total_gb` | float | swap_total_gb（GB） |
-| `performance.memory.swap_used_gb` | float | swap_used_gb（GB） |
 | `performance.load.available` | bool | available（布尔） |
 | `performance.load.avg1` | float | avg1 |
 | `performance.load.avg5` | float | avg5 |
@@ -264,7 +264,7 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `services[].name` | str | 服务名 |
 | `services[].status` | str | ok/warn/down/unknown |
 | `services[].detail` | str | 一句话状态 |
-| `services[].groupNote` | str | 分组补充说明（可能缺失） |
+| `services[].groupNote` | str | 分组补充说明；没有就是 null |
 
 
 ## `GET /api/performance`
@@ -306,11 +306,11 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `memory.total_gb` | float | 内存总量（GB） |
 | `memory.percent` | float | 内存占用率（0–100） |
 | `memory.free_gb` | float | 空闲（GB） |
+| `memory.swap_total_gb` | float | 交换区总量（GB） |
+| `memory.swap_used_gb` | float | 交换区已用（GB） |
 | `memory.buffers_gb` | float | 内核缓冲（GB） |
 | `memory.cached_gb` | float | 页缓存（GB） |
 | `memory.shared_gb` | float | 共享内存（GB） |
-| `memory.swap_total_gb` | float | 交换区总量（GB） |
-| `memory.swap_used_gb` | float | 交换区已用（GB） |
 | `load.available` | bool | available（布尔） |
 | `load.avg1` | float | 1 分钟平均负载 |
 | `load.avg5` | float | 5 分钟平均负载 |
@@ -454,6 +454,7 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `interfaces.physical[].ipv4` | str | IPv4（可能缺失） |
 | `interfaces.physical[].ipv6` | str | IPv6（可能缺失） |
 | `interfaces.physical[].mac` | str | MAC |
+| `interfaces.physical[].wireless` | NoneType | 无线接口的 SSID/信号等；非无线接口为 null |
 | `interfaces.virtual` | 数组（标量，示例长度 12） | 虚拟接口（docker/网桥/veth） |
 | `interfaces.virtual[].name` | str | name |
 | `interfaces.virtual[].kind` | str | kind |
@@ -461,8 +462,10 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `interfaces.virtual[].speed_mbps` | NoneType | speed_mbps（可能为 null） |
 | `interfaces.virtual[].mtu` | int | mtu |
 | `interfaces.virtual[].ipv4` | str | IPV4 |
+| `interfaces.virtual[].ipv6` | NoneType | IPV6 |
 | `interfaces.virtual[].mac` | str | MAC |
-| `lan.hosts` | 数组（标量，示例长度 6） | 发现的局域网设备 |
+| `interfaces.virtual[].wireless` | NoneType | wireless（可能为 null） |
+| `lan.hosts` | 数组（标量，示例长度 7） | 发现的局域网设备 |
 | `lan.hosts[].ip` | str | 设备 IP |
 | `lan.hosts[].alive` | NoneType | ICMP 是否存活（null = 仅邻居表） |
 | `lan.hosts[].name` | NoneType | 反向 DNS 名称（可能为 null） |
@@ -506,7 +509,7 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `containers.running` | int | 运行中数量 |
 | `systemd.available` | bool | systemctl 是否可用 |
 | `systemd.total` | int | 运行中的服务数 |
-| `systemd.list` | 数组（标量，示例长度 48） | 运行中的服务列表 |
+| `systemd.list` | 数组（标量，示例长度 49） | 运行中的服务列表 |
 | `systemd.list[].unit` | str | 单元名 |
 | `systemd.list[].description` | str | 服务描述 |
 | `ports` | 数组（标量，示例长度 24） | 监听端口表 |
@@ -539,7 +542,7 @@ curl -s -b cookies.txt http://127.0.0.1:8282/api/overview
 | `ts` | float | 服务器时间戳（Unix 秒，浮点） |
 | `count` | int | 进程总数 |
 | `interval` | float | 采样间隔（秒） |
-| `processes` | 数组（标量，示例长度 304） | processes |
+| `processes` | 数组（标量，示例长度 291） | processes |
 | `processes[].pid` | int | 进程号 |
 | `processes[].name` | str | 进程名 |
 | `processes[].user` | str | 所属用户 |

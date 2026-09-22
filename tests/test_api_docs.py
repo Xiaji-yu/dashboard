@@ -60,29 +60,79 @@ def parse_doc(text):
     return result
 
 
+def walk_path(node, segments):
+    """按路径段走下走一层；返回 (状态, 值)，状态含义见 resolve。"""
+    if not segments:
+        return "ok", node
+    head, rest = segments[0], segments[1:]
+    is_array = head.endswith("[]")
+    key = head[:-2] if is_array else head
+    if not isinstance(node, dict):
+        return "degraded", None
+    if key not in node:
+        # 父级自己声明不可用（Linux 无电池、Windows 无温度…）→ 环境差异，不算漂移
+        return ("degraded", None) if node.get("available") is False else ("missing", None)
+    value = node[key]
+    if not is_array:
+        return walk_path(value, rest)
+    if not isinstance(value, list) or not value:
+        return "degraded", None
+    # 数组元素：**任一元素**含该字段即可（不同接口有没有 IPv4 是环境差异，
+    # 但字段名写错在哪个元素上都找不到）
+    best = "missing"
+    for item in value:
+        status, found = walk_path(item, rest)
+        if status == "ok":
+            return status, found
+        if status == "degraded":
+            best = "degraded"
+    return best, None
+
+
 def resolve(payload, path):
     """按文档里的路径取值；返回 (状态, 值)。
 
     状态：ok=取到；degraded=父级声明不可用或数组为空（环境差异，跳过）；
-    missing=父级存在但字段不存在（文档漂移）。
+    missing=父级存在且数组里有元素，但字段一个都没有（文档漂移）。
     """
-    node = payload
-    for segment in path.split("."):
-        is_array = segment.endswith("[]")
-        key = segment[:-2] if is_array else segment
-        if isinstance(node, dict):
-            if key not in node:
-                if node.get("available") is False:
-                    return "degraded", None
-                return "missing", None
-            node = node[key]
-        else:
-            return "degraded", None
-        if is_array:
-            if not isinstance(node, list) or not node:
-                return "degraded", None
-            node = node[0]
-    return "ok", node
+    return walk_path(payload, path.split("."))
+
+
+class ResolveRuleTest(unittest.TestCase):
+    """resolve() 的判定规则：环境差异跳过、字段漂移报错、数组看任一元素。"""
+
+    def test_missing_key_with_available_false_is_skipped(self):
+        payload = {"temps": {"available": False, "reason": "没有传感器"}}
+        self.assertEqual(resolve(payload, "temps.list"), ("degraded", None))
+
+    def test_missing_key_on_present_parent_is_drift(self):
+        """父级在、available 也是 true，但字段名对不上 → 文档漂移，必须报错。"""
+        payload = {"temps": {"available": True, "reason": None}}
+        self.assertEqual(resolve(payload, "temps.list"), ("missing", None))
+
+    def test_present_key_with_empty_list_is_ok(self):
+        """键存在但数组为空：字段没写错，不算漂移。"""
+        payload = {"temps": {"available": True, "list": []}}
+        self.assertEqual(resolve(payload, "temps.list"), ("ok", []))
+        self.assertEqual(resolve(payload, "temps.list[]"), ("degraded", None))
+
+    def test_array_passes_when_any_element_has_field(self):
+        """CI 实测：有的接口没有 IPv4，但只要有一个接口有，就说明字段名没写错。"""
+        payload = {"physical": [{"name": "eth0"},          # 没 ipv4
+                                {"name": "eth1", "ipv4": "192.168.1.2"}]}
+        self.assertEqual(resolve(payload, "physical[].ipv4"), ("ok", "192.168.1.2"))
+
+    def test_array_all_elements_missing_is_drift(self):
+        payload = {"physical": [{"name": "eth0"}, {"name": "eth1"}]}
+        self.assertEqual(resolve(payload, "physical[].ipv4"), ("missing", None))
+
+    def test_empty_array_is_environment_difference(self):
+        payload = {"physical": []}
+        self.assertEqual(resolve(payload, "physical[].ipv4"), ("degraded", None))
+
+    def test_nested_object_inside_array(self):
+        payload = {"containers": {"list": [{"name": "a", "image": "nginx"}]}}
+        self.assertEqual(resolve(payload, "containers.list[].image"), ("ok", "nginx"))
 
 
 class ApiDocsTest(unittest.TestCase):
