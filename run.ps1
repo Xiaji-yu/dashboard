@@ -47,7 +47,11 @@ switch ($Action) {
         $pid = Get-DashboardPid
         if ($pid) { Write-Host "总控台已在运行（PID $pid，端口 $Port）"; return }
         if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-            throw "找不到 python 命令。先装 Python 3.9+，并 pip install psutil"
+            throw "找不到 python 命令。先装 Python 3.9+（安装时勾选 Add python.exe to PATH）"
+        }
+        python -c "import psutil" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "缺少依赖 psutil，请先执行：  python -m pip install psutil"
         }
         $env:DASHBOARD_HOST = $Host_
         $env:DASHBOARD_PORT = $Port

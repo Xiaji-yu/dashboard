@@ -61,6 +61,9 @@ cd C:\path\\to\dashboard
 
 ## 我想请你在 Windows 上帮我验证
 
+前提：`python -m pip install psutil` 已装好（缺它会直接 `ModuleNotFoundError`，
+现在导入 `platform_win` 时会给出这句人话提示）。
+
 我在 Linux 上没有 Windows 机器，**以下都是未实测的**。麻烦在有 Windows 的机器上跑一遍，把
 输出发我（直接贴文本即可）：
 

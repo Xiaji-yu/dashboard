@@ -23,7 +23,13 @@ param(
 $ErrorActionPreference = "Stop"
 $Dir = Split-Path -Parent $PSScriptRoot
 $Python = (Get-Command python -ErrorAction SilentlyContinue).Source
-if (-not $Python) { throw "找不到 python 命令；先装 Python 3.9+ 并 pip install psutil" }
+if (-not $Python) {
+    throw "找不到 python 命令；先装 Python 3.9+（安装时勾选 Add python.exe to PATH）"
+}
+python -c "import psutil" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    throw "缺少依赖 psutil，请先执行：  python -m pip install psutil"
+}
 
 $BinPath = "`"$Python`" `"$Dir\server.py`""
 

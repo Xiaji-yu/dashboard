@@ -26,6 +26,16 @@ ARP_TIMEOUT = 5.0
 
 IS_WINDOWS = sys.platform.startswith("win")
 
+if IS_WINDOWS:
+    # 提前到模块导入时检查：缺包时给一句人话，而不是让人从 traceback 里猜
+    try:
+        import psutil  # noqa: F401  （本模块几乎每个函数都要用，装一次就够）
+    except ImportError as exc:      # pragma: no cover - 仅在缺包的 Windows 上命中
+        raise SystemExit(
+            "缺少依赖 psutil，看板无法启动。\n"
+            "  请先安装：  python -m pip install psutil\n"
+            f"  原始错误：  {exc}")
+
 
 # ---------------- 子进程封装 ----------------
 
@@ -230,6 +240,7 @@ def machine_info():
 def cpu_summary():
     """CPU 型号与核心数：psutil 给核心数，Win32_Processor 给型号与频率。"""
     import platform
+
     import psutil
     payload = powershell_json(
         "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,"
