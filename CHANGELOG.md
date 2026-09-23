@@ -18,7 +18,7 @@
   - `deploy/install-windows.ps1` 新增 `-ExePath`，可把 exe 直接注册成服务；
   - 新增 `tests/test_runtime.py`（14 例）：打桩 `sys.frozen`/`_MEIPASS`/`sys.executable`
     就能在没有 Windows 的机器上验证上述路径逻辑。
-- **Windows 移植**（`platform_win.py` + 15 处平台分派）：主机信息改用 PowerShell
+- **Windows 移植**（`platform_win.py` + 19 处平台分派）：主机信息改用 PowerShell
   (`Win32_OperatingSystem`/`Win32_ComputerSystem`/`Win32_BIOS`/`Win32_Processor`/`Win32_DiskDrive`)，
   USB/蓝牙用 `Get-PnpDevice`，系统服务用 `Get-Service`（前端卡片标题随之切换），
   无线网卡用 `netsh wlan show interfaces`（信号为百分比），邻居表用 `arp -a`、
@@ -175,6 +175,18 @@
   并修正 iOS 不支持的 `background-attachment: fixed`。
 - 页面切到后台或锁屏时自动暂停轮询，回到前台立即刷新一次，省电省流量；
   首次渲染不受该策略影响，后台标签页打开不会白屏。
+
+### 文档与元数据
+
+- `pyproject.toml` 补上 `[project]` 元数据：名称 `dashboard`、版本 `0.2.0`、一句话描述、
+  `requires-python >= 3.9`、MIT 许可证、依赖 `psutil>=5.9`、14 个 PyPI 分类器
+  （开发阶段 / 平台 / Python 版本 / 主题）、Homepage / Issues / Changelog 链接；
+  不做打包分发，安装方式不变。版本与 CHANGELOG 对应，后续发版同步更新。
+- 修正文档里过时的数字与残留：Python 用例 66 → **280**、前端图表用例 8 → **9**、
+  Windows 分派点 15 → **19**、「多页面（分批上线）」的双份描述清掉、目录结构补
+  `auth.py` / `runtime.py` / `login.*` / `docs/API.md` 等条目并修好错位与游离注释。
+- `CONTRIBUTING.md` 用例运行时长改为实测口径（约 40 秒），并新增「仓库元数据」一节，
+  约定发版时同步 `version` 与 CHANGELOG。
 
 ### 计划中
 

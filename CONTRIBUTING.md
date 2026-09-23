@@ -18,7 +18,7 @@ pip install -r requirements-dev.txt
 提交前请确保这两条都通过：
 
 ```bash
-python3 -m unittest discover -v      # 全部用例应在数秒内通过
+python3 -m unittest discover -v      # 280 个用例，本机约 40 秒
 node tests/chart.test.js             # 前端图表用例
 ruff check .                         # 无告警
 ```
@@ -41,6 +41,14 @@ ruff check .                         # 无告警
 - 采集/网络/外部命令的失败路径用 `unittest.mock` 构造，保证测试离线可跑、结果稳定。
 - 接口测试请用 `server.create_server(collector, "127.0.0.1", 0)`，让内核分配端口，
   不要在测试里绑定固定的 8282。
+
+## 仓库元数据
+
+- 名称 / 版本 / 依赖 / 许可证 / 链接集中在 `pyproject.toml` 的 `[project]` 表（本项目不打包分发，
+  这些只是元数据，安装路径仍是 `requirements.txt` + 直接跑脚本）；
+- **发版时同步 `version` 与 `CHANGELOG.md`**：把 `Unreleased` 改名成 `x.y.z - 日期` 并打同名 tag；
+- 只读文档（README / docs / CONTRIBUTING）里的数字（用例数、分派点数等）改完后顺手核对，
+  别让「66 个用例」这种过期数字长期挂着。
 
 ## 提交信息
 

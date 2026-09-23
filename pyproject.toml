@@ -1,5 +1,58 @@
 # 本项目不做打包分发（扁平结构，直接跑 server.py），
-# 此文件只用来集中配置测试与代码风格工具。
+# 此文件集中 [project] 元数据（仓库名称/版本/依赖/许可证/链接，供 GitHub 与工具识别）
+# 以及测试与代码风格工具配置。
+
+[project]
+name = "dashboard"
+# 版本跟随 CHANGELOG：0.1.0 已发布，当前 Unreleased 的新功能按 0.2.0 发布
+version = "0.2.0"
+description = "零外部依赖的本机状态看板：浏览器实时查看 CPU / 内存 / 磁盘 / 网速 / 温度 / 进程 / 容器 / 设备"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Xiaji-yu" }]
+keywords = [
+    "dashboard",
+    "monitoring",
+    "system-monitor",
+    "self-hosted",
+    "psutil",
+    "linux",
+    "windows",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Networking :: Monitoring",
+]
+# 运行时依赖与 requirements.txt 保持一致
+dependencies = [
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+# 安装 `pip install -e ".[dev]"`（或 requirements-dev.txt）后跑测试与 ruff
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/Xiaji-yu/dashboard"
+Repository = "https://github.com/Xiaji-yu/dashboard"
+Issues = "https://github.com/Xiaji-yu/dashboard/issues"
+Changelog = "https://github.com/Xiaji-yu/dashboard/blob/main/CHANGELOG.md"
 
 [tool.ruff]
 # 注释与文档字符串含中文，行宽放宽到 120（当前最长行 116）

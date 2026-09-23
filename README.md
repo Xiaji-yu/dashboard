@@ -19,9 +19,8 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 - **零依赖前端**：曲线、进度条、状态点全是手写 HTML/CSS/SVG，没有构建步骤，也不需要 npm。
 - **移动端自适应**：窄屏下侧边栏折叠为吸顶顶栏（页签横向滑动），指标与卡片单列排布；
   切后台/锁屏自动暂停轮询，回前台立即刷新。
-- **多页面（分批上线）**：前端为 hash 路由单页应用，页面模块按需加载；
-  已上线「概览」「性能与电源」（每核占用、5 路温度、风扇转速、核显频率、内存构成、电池）
-  **六个页面全部上线**：概览、性能与电源（每核占用、温度、风扇、核显频率、内存构成、电池）、
+- **六个页面全部上线**：前端为 hash 路由单页应用，页面模块按需加载——概览、
+  性能与电源（每核占用、温度、风扇、核显频率、内存构成、电池）、
   进程（全量列表、搜索、锁定排序、行展开）、网络与磁盘（网速曲线、连接、网卡、磁盘读写）、
   服务（可配置远程探测、容器、监听端口与「谁能访问」、systemd）、
   设备（与这台机器连接的设备：USB / 蓝牙 / 网络接口 / 局域网设备）。
@@ -37,11 +36,11 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
   用 `Authorization: Bearer <token>` 或 `?token=<token>` 携带；**只能访问 GET 接口**，
   不能改密码、退出或管理令牌；服务端只存 SHA-256，撤销即时生效；URL 里的令牌会被日志脱敏。
 - **跨平台**：后端 `psutil` + 标准库；Linux 走 `/proc`、`/sys`、`systemctl`，Windows 走
-  PowerShell(`ConvertTo-Json`) + `netsh` + `arp` 取同等真实数据（`platform_win.py`，15 处分派点，
+  PowerShell(`ConvertTo-Json`) + `netsh` + `arp` 取同等真实数据（`platform_win.py`，19 处分派点，
   前端零改动）。拿不到的（Windows 上的温度/风扇/整机功耗/核显频率）如实显示「不可用」。
   详见 [docs/windows.md](docs/windows.md)；也能用 `deploy/build-exe.ps1` 打包成
   **免装 Python 的 exe**（资源与可写数据分离、无控制台时用文件+弹窗提示初始密码）。
-- **有测试**：66 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 8 个前端图表用例
+- **有测试**：280 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 9 个前端图表用例
   守住曲线绘制；CI 里跑 ruff + 两套测试 + 接口冒烟。
 
 ## 截图
@@ -338,8 +337,8 @@ $ curl -s localhost:8282/api/overview | python3 -m json.tool | head -12
 ```bash
 pip install -r requirements-dev.txt
 
-python3 -m unittest discover -v      # 66 个 Python 用例，约 1 秒
-node tests/chart.test.js             # 8 个前端图表用例（不需要浏览器）
+python3 -m unittest discover -v      # 280 个 Python 用例，本机约 40 秒
+node tests/chart.test.js             # 9 个前端图表用例（不需要浏览器）
 ruff check .                         # 代码风格（行宽 120，规则集 E/F/W）
 ./run.sh fg                          # 前台跑起来看效果
 ```
@@ -356,26 +355,41 @@ ruff check .                         # 代码风格（行宽 120，规则集 E/F
 
 ```
 dashboard/
-├── server.py              # HTTP 服务、路由、JSON 接口
-├── collector.py           # 指标采集（psutil + /proc + docker + hwmon），含降级处理
-├── history.py             # 曲线用的时序环形缓冲
+├── server.py          # HTTP 服务、路由、JSON 接口与账号鉴权
+├── auth.py            # 凭据 / 会话 / 只读令牌（PBKDF2、Cookie）
+├── collector.py       # 指标采集（psutil + /proc + docker + hwmon），含降级处理
+├── platform_win.py    # Windows 专有采集（PowerShell/netsh/arp），Linux 上与 collector 二选一
+├── runtime.py         # 运行时路径：区分只读资源与可写数据（PyInstaller 打包用）
+├── history.py         # 曲线用的时序环形缓冲
 ├── static/
-│   ├── index.html         # 单页应用骨架（hash 路由）
-│   ├── style.css          # 深色主题（含移动端断点）
-│   ├── chart.js           # 手绘 SVG 折线图
-│   ├── app.js             # 前端核心：路由、徽章轮询、公共工具
-│   └── pages/             # 页面模块（概览、性能与电源……）按需加载
-├── probes.json            # 服务页的远程探测目标（可改，改完不用重启）
-├── tests/                 # Python 用例 + chart.test.js（Node 前端图表用例）
-├── deploy/                # systemd 服务单元与 RAPL 权限 udev 规则
-├── tools/               # gen_api_doc.py：从真实响应生成 docs/API.md
+
+│   ├── index.html     # 单页应用骨架（hash 路由）
+│   ├── login.html     # 登录页（唯一公开页面）
+│   ├── style.css      # 深色主题（含移动端断点）
+│   ├── chart.js       # 手绘 SVG 折线图
+│   ├── app.js         # 前端核心：路由、徽章轮询、公共工具
+│   ├── login.js       # 登录页逻辑
+│   └── pages/         # 页面模块（概览、性能与电源……）按需加载
+├── probes.json        # 服务页的远程探测目标（可改，改完不用重启）
+├── run.sh             # Linux/macOS 启停脚本
+├── run.ps1            # Windows 启停脚本
+├── tests/             # Python 用例 + chart.test.js（Node 前端图表用例）
+├── deploy/            # systemd 单元、RAPL udev 规则、Windows 打包与装机脚本
+├── tools/             # gen_api_doc.py：从真实响应生成 docs/API.md
 ├── docs/
-│   ├── screenshot.png     # 本项目运行截图
-│   └── reference/         # UI 参考图（见该目录 README）
-├── run.sh                  # Linux/macOS 启停脚本
-├── run.ps1                 # Windows 启停脚本
-├── platform_win.py         # Windows 专有采集（PowerShell/netsh/arp），Linux 上与 collector 二选一                 # 启停脚本
-└── pyproject.toml         # 仅放 pytest / ruff 配置（本项目不做打包分发）
+
+│   ├── API.md         # 字段级接口文档（由 tools/gen_api_doc.py 生成）
+│   ├── windows.md     # Windows 版装机与能力对照
+│   ├── screenshot.png # 本项目运行截图
+│   └── reference/     # UI 参考图（见该目录 README，不随 MIT 授权）
+├── requirements.txt   # 运行时依赖（只有 psutil）
+├── .github/workflows/ # CI：ruff + 单元测试 + 接口冒烟 + 前端图表测试
+├── CHANGELOG.md       # 更新日志（Keep a Changelog）
+├── CONTRIBUTING.md    # 贡献指南
+├── SECURITY.md        # 安全策略
+├── LICENSE            # MIT
+├── pyproject.toml     # [project] 元数据 + pytest / ruff 配置（本项目不做打包分发）
+└── .gitignore         # auth.json、日志、截图等不入库
 ```
 
 ## 设计来源与差异

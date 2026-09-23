@@ -174,7 +174,7 @@ python -c "import collector; c=collector.Collector(); import json; print(json.du
 ## 代码位置
 
 - `platform_win.py`：Windows 专有采集（纯解析函数 + 子进程封装，可在 Linux 上单测）
-- `collector.py`：`if IS_WINDOWS:` 分派点（共 15 处，Linux 原样不动）
+- `collector.py`：`if IS_WINDOWS:` 分派点（共 19 处，Linux 原样不动）
 - `tests/test_windows_port.py`：解析器回归测试（CI 在 Linux 上也能跑）
 - `run.ps1`、`deploy/install-windows.ps1`：启动与装机
 - Linux 的 `run.sh` / `deploy/dashboard.service` 不受影响
