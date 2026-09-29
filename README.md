@@ -40,7 +40,7 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
   前端零改动）。拿不到的（Windows 上的温度/风扇/整机功耗/核显频率）如实显示「不可用」。
   详见 [docs/windows.md](docs/windows.md)；也能用 `deploy/build-exe.ps1` 打包成
   **免装 Python 的 exe**（资源与可写数据分离、无控制台时用文件+弹窗提示初始密码）。
-- **有测试**：280 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 9 个前端图表用例
+- **有测试**：287 个 Python 用例覆盖采集、缓冲、接口契约与降级路径，另有 9 个前端图表用例
   守住曲线绘制；CI 里跑 ruff + 两套测试 + 接口冒烟。
 
 ## 截图
@@ -337,7 +337,7 @@ $ curl -s localhost:8282/api/overview | python3 -m json.tool | head -12
 ```bash
 pip install -r requirements-dev.txt
 
-python3 -m unittest discover -v      # 280 个 Python 用例，本机约 40 秒
+python3 -m unittest discover -v      # 287 个 Python 用例，本机约 40 秒
 node tests/chart.test.js             # 9 个前端图表用例（不需要浏览器）
 ruff check .                         # 代码风格（行宽 120，规则集 E/F/W）
 ./run.sh fg                          # 前台跑起来看效果

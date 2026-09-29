@@ -18,7 +18,7 @@ pip install -r requirements-dev.txt
 提交前请确保这两条都通过：
 
 ```bash
-python3 -m unittest discover -v      # 280 个用例，本机约 40 秒
+python3 -m unittest discover -v      # 287 个用例，本机约 40 秒
 node tests/chart.test.js             # 前端图表用例
 ruff check .                         # 无告警
 ```

@@ -9,6 +9,7 @@ import http.client
 import io
 import json
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -322,6 +323,36 @@ class HttpApiTest(unittest.TestCase):
             self.assertIn(expected, ctype, path)
             self.assertTrue(body, path)
 
+    def test_malformed_request_line_does_not_log_a_traceback(self):
+        """扫描器常发畸形请求行：parse_request 在给 self.path 赋值前就失败，
+        随后 send_error -> log_request -> log_message。
+
+        修复前 log_message 在这里抛 AttributeError，socketserver 打整段 traceback
+        （线上日志 02:40 那批刷屏的来源）。读到连接关闭时 traceback（若有）必然已打完，
+        所以可以直接断言 stderr 里没有它。
+        """
+        captured = io.StringIO()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock, \
+                contextlib.redirect_stderr(captured):
+            sock.sendall(b"@@@ not-a-request-line @@@\r\n\r\n")
+            sock.settimeout(5)
+            while sock.recv(4096):          # 读到对端关连接为止
+                pass
+        self.assertNotIn("AttributeError", captured.getvalue())
+
+    def test_server_survives_malformed_request(self):
+        """畸形请求之后服务必须还能正常响应。"""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as sock:
+            sock.sendall(b"\x00\x01\x02 junk not http\r\n\r\n")
+            sock.settimeout(5)
+            try:
+                while sock.recv(4096):
+                    pass
+            except OSError:
+                pass
+        status, _ctype, _body = self.request("/api/auth")
+        self.assertEqual(status, 200)
+
     def test_unknown_path_returns_404(self):
         status, _, _ = self.request("/definitely-not-here")
         self.assertEqual(status, 404)
@@ -331,6 +362,39 @@ class HttpApiTest(unittest.TestCase):
             status, _, body = self.request(path)
             self.assertEqual(status, 404, path)
             self.assertNotIn(b"import", body, path)
+
+
+class LogMessageTest(unittest.TestCase):
+    """log_message 的健壮性：畸形请求在 self.path 赋值前就走到了这里。"""
+
+    @staticmethod
+    def _handler(**attrs):
+        """按属性清单造 handler：没列的属性访问即 AttributeError（复现线上场景）。"""
+        handler = mock.Mock(spec=["address_string"] + list(attrs))
+        handler.address_string.return_value = "203.0.113.9"
+        for key, value in attrs.items():
+            setattr(handler, key, value)
+        return handler
+
+    def test_logging_without_path_does_not_raise(self):
+        handler = self._handler()
+        with mock.patch("builtins.print") as fake_print:
+            server.Handler.log_message(handler, '"%s" %s %s', "@@@ junk @@@", "400", "-")
+        line = fake_print.call_args[0][0]
+        self.assertIn("[http] 203.0.113.9", line)
+        self.assertIn("400", line)
+
+    def test_favicon_404_is_not_logged(self):
+        handler = self._handler(path="/favicon.ico")
+        with mock.patch("builtins.print") as fake_print:
+            server.Handler.log_message(handler, '"%s" %s %s', "/favicon.ico", "404", "-")
+        fake_print.assert_not_called()
+
+    def test_successful_request_is_not_logged(self):
+        handler = self._handler(path="/api/overview")
+        with mock.patch("builtins.print") as fake_print:
+            server.Handler.log_message(handler, '"%s" %s %s', "/api/overview", "200", "-")
+        fake_print.assert_not_called()
 
 
 class AuthFlowTest(unittest.TestCase):

@@ -335,6 +335,59 @@ class ProcessListTest(unittest.TestCase):
         self.assertIsNone(collector._container_of(None))
 
 
+class ProcessVanishingTest(unittest.TestCase):
+    """进程枚举出来后才退出：只丢那一行，整张表照常返回。
+
+    设备页的局域网扫描会一次拉起几十个只活几百毫秒的 `ping`，它们随时可能
+    在「读完 CPU/内存」与「读用户名/命令行」之间消失。这里曾漏掉 NoSuchProcess，
+    采样线程每秒报一次「进程列表失败」（线上日志的刷屏来源之一）。
+    """
+
+    def test_row_vanishing_before_static_info_drops_only_itself(self):
+        collector = Collector()
+        pids = list(collector._procs)
+        self.assertTrue(pids, "进程表应当已经预热过")
+        target = pids[0]
+        real_static = collector._process_static
+
+        def flaky_static(proc, create_time, name=""):
+            # 模拟进程在读静态信息前一刻退出
+            if proc.pid == target:
+                raise psutil.NoSuchProcess(proc.pid, "ping")
+            return real_static(proc, create_time, name)
+
+        collector._process_static = flaky_static
+        collector._prime_processes = lambda: None      # 别让新进程进表干扰断言
+        try:
+            rows = collector.process_list()
+        finally:
+            collector._process_static = real_static
+
+        got = {row["pid"] for row in rows}
+        self.assertNotIn(target, got, "已经退出的进程本轮不该有行")
+        self.assertIn(os.getpid(), got, "自己的进程必须还在")
+        dropped = len(pids) - len(got)
+        self.assertLessEqual(dropped, 10, f"只应丢掉目标那一行，实际丢了 {dropped} 行")
+
+    def test_vanished_process_is_forgotten(self):
+        """退出过的 pid 要从进程表里清掉，否则每轮都要重新撞一次异常。"""
+        collector = Collector()
+        collector._procs = {}
+        collector._proc_static = {}
+        ghost = mock.MagicMock(pid=4242)      # 仍在表里，但读静态信息时就已退出
+        collector._procs[4242] = ghost
+
+        def flaky_static(proc, create_time, name=""):
+            raise psutil.NoSuchProcess(4242, "ping")
+
+        collector._process_static = flaky_static
+        collector._prime_processes = lambda: None
+        rows = collector.process_list()
+        self.assertEqual(rows, [])
+        self.assertNotIn(4242, collector._procs)
+        self.assertNotIn(4242, collector._proc_static)
+
+
 class DefaultGatewayTest(unittest.TestCase):
     """/proc/net/route 解析：网关是十六进制小端。"""
 

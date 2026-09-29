@@ -167,6 +167,18 @@
 - 采集层新增每核占用与频率、hwmon 风扇、Intel 核显频率、电池（sysfs power_supply）、
   内存细分（缓冲/缓存/共享）；`/api/performance` 接口与 `/api/series?keys=` 按需取序列
   （未知键返回 400），新增序列键 `cpu0..n` / `fan_cpu` / `gpu_mhz` / `temp_acpi`。
+- **修掉 `journalctl` 里两类刷屏异常**（都不影响服务运行，但让日志看起来像崩了，
+  线上从互联网扫描器与设备页 LAN 扫描两个方向各触发一类）：
+  - `log_message` 假定 `self.path` 一定存在：畸形请求行会让 `parse_request` 在给它赋值
+    之前就失败，随后 `send_error → send_response → log_request` 走进 `self.path`，
+    抛 `AttributeError`，socketserver 给每个扫描器请求打一整段 traceback。
+    改为 `getattr` 兜底——畸形请求现在只留一行 `[http] <ip> "<请求行>" 400`；
+  - `process_list` 的 `_process_static` 里 `proc.name()` 写在 try 之外：设备页 LAN 扫描
+    拉起的几十个 `ping` 只活几百毫秒，随时可能读完 CPU/内存后、读静态信息前退出，
+    漏出 `NoSuchProcess`，采样线程每秒记一条「进程列表失败」。改为进程名由调用方传进去
+    （少一次独立读取就少一个竞态窗口），整个调用包 try：只丢那一行并把它从进程表清掉。
+  - 新增 7 个回归用例：畸形请求不打 traceback、之后服务仍能响应、favicon 404 与
+    成功请求保持静默、进程中途退出只丢自己那一行且从进程表里忘掉。
 
 ### 移动端适配（上一批次）
 

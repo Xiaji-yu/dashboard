@@ -614,7 +614,14 @@ class Collector:
                 self._procs.pop(proc.pid, None)
                 self._proc_static.pop(proc.pid, None)
                 continue
-            static = self._process_static(proc, create_time)
+            try:
+                # 进程可能在读完其他字段之后、读静态信息之前退出（设备页 LAN 扫描的
+                # ping 这类短命进程很常见）：只丢这一行，别让整张表都取不到
+                static = self._process_static(proc, create_time, name)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                self._procs.pop(proc.pid, None)
+                self._proc_static.pop(proc.pid, None)
+                continue
             rows.append({
                 "pid": pid,
                 "name": name,
@@ -636,8 +643,13 @@ class Collector:
         rows.sort(key=lambda row: (row["cpu"], row["rss_mb"]), reverse=True)
         return rows
 
-    def _process_static(self, proc, create_time):
-        """进程的不变信息：用户、命令行、容器归属。"""
+    def _process_static(self, proc, create_time, name=""):
+        """进程的不变信息：用户、命令行、容器归属。
+
+        `name` 由调用方连同其他字段一起读到后传进来——进程随时可能退出，
+        少一次独立的 `proc.name()` 就少一个竞态窗口（collector 曾在此漏 NoSuchProcess）。
+        调用方已用 try 兜住整个调用，这里只保证内部字段各自有降级。
+        """
         pid = proc.pid
         cached = self._proc_static.get(pid)
         if cached and cached["create_time"] == create_time:
@@ -647,7 +659,6 @@ class Collector:
             info["user"] = proc.username()
         except (psutil.AccessDenied, psutil.NoSuchProcess, KeyError):
             info["user"] = None
-        name = proc.name() or ""
         try:
             parts = proc.cmdline()
             cmd = " ".join(parts)

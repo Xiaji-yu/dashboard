@@ -608,8 +608,11 @@ class Handler(BaseHTTPRequestHandler):
         # 默认每条请求都打日志；这里只保留错误，避免刷屏
         status = args[1] if len(args) > 1 else ""
         if str(status).startswith(("4", "5")):
+            # 畸形请求行会让 parse_request 在给 self.path 赋值之前就失败，
+            # 随后 send_error -> log_request -> 走到这里，self.path 还不存在
+            path = getattr(self, "path", "") or ""
             # 浏览器自动请求 favicon，没放图标时全是 404，没有诊断价值
-            if "favicon.ico" in self.path:
+            if "favicon.ico" in path:
                 return
             line = redact_token(fmt % args)
             print(f"[http] {self.address_string()} {line}", flush=True)
