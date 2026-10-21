@@ -21,7 +21,7 @@
     top.className = 'perf-top net-top';
     top.innerHTML =
       '<div class="perf-top-left">' +
-        '<div class="card-title"><span class="tick" style="background:#3ddc97"></span>网速</div>' +
+        '<div class="card-title"><span class="tick" style="background:#111111"></span>网速</div>' +
         '<div class="net-block"><div class="net-label">下载</div>' +
           '<div class="big-value"><span id="v-down">—</span></div></div>' +
         '<div class="net-block"><div class="net-label">上传</div>' +
@@ -32,8 +32,8 @@
         '<div class="big-chart" id="c-net"></div>' +
         '<div class="chart-foot">' +
           '<span class="legend">' +
-            '<i style="background:#3ddc97"></i>下载' +
-            '<i style="background:#ff6b9d"></i>上传' +
+            '<i style="background:#111111"></i>下载' +
+            '<i style="background:#8a8782"></i>上传' +
           '</span>' +
           '<span id="net-foot">最近 2 分钟</span>' +
         '</div>' +
@@ -80,13 +80,13 @@
     host.appendChild(cards);
 
     charts.net = window.createChart(document.getElementById('c-net'), {
-      series: [{ key: 'net_down', color: '#3ddc97', fill: false },
-               { key: 'net_up', color: '#ff6b9d', fill: false }],
+      series: [{ key: 'net_down', color: '#111111', fill: false },
+               { key: 'net_up', color: '#8a8782', fill: false }],
       autoMinTop: 4096, window: WINDOW_SECONDS
     });
     charts.disk = window.createChart(document.getElementById('c-disk'), {
-      series: [{ key: 'disk_read', color: '#4fc3f7', fill: true, width: 1.6 },
-               { key: 'disk_write', color: '#ffb74d', fill: true, width: 1.6 }],
+      series: [{ key: 'disk_read', color: '#3a3a3a', fill: true, width: 1.6 },
+               { key: 'disk_write', color: '#8a8782', fill: true, width: 1.6 }],
       autoMinTop: 65536, window: WINDOW_SECONDS
     });
   }

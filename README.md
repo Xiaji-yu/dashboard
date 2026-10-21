@@ -385,7 +385,7 @@ dashboard/
 
 │   ├── index.html     # 单页应用骨架（hash 路由）
 │   ├── login.html     # 登录页（唯一公开页面）
-│   ├── style.css      # 深色主题（含移动端断点）
+│   ├── style.css      # 纸白墨黑主题，对齐 xiaji-home（含移动端断点）
 │   ├── chart.js       # 手绘 SVG 折线图
 │   ├── app.js         # 前端核心：路由、徽章轮询、公共工具
 │   ├── login.js       # 登录页逻辑
@@ -414,7 +414,12 @@ dashboard/
 
 ## 设计来源与差异
 
-UI 结构参考了一组 macOS 系统监控面板的截图（见 `docs/reference/`），本项目按 Linux 的实际能力做了取舍：
+**结构**参考了一组 macOS 系统监控面板的截图（见 `docs/reference/`），
+**视觉**（配色、细线、字体与标签）对齐同目录的 [xiaji-home](https://github.com/Xiaji-yu/xiaji-home) 个人站：
+`#f5f4f1` 纸色底、`#111` 墨线与墨字、等宽小标签、直角卡片和胶囊按钮；数据密度与布局不变。
+字体优先使用本机已安装的 Inter / JetBrains Mono，不引外部字体 CDN，没有就回退系统字体。
+
+本项目按 Linux 的实际能力做了取舍：
 
 1. **概览页去掉 MacBook 示意图整块**（含环境光、屏幕张开角度），上半部分改为 5 条指标曲线铺满全宽。
 2. **性能与电源页尽量贴近参考图版式**：上半部分一张大卡（左侧大数字 + 按物理核分组的占用条 + GPU 频率，

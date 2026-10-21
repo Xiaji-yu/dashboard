@@ -4,16 +4,16 @@
 (function () {
   /* 上半部分：去掉示意图后的 5 条指标，曲线铺满整行 */
   var METRICS = [
-    { key: 'cpu', label: 'CPU 占用', hex: '#3ddc97',
-      series: [{ key: 'cpu', color: '#3ddc97', fill: true }], fixed: [0, 100] },
-    { key: 'mem', label: '内存', hex: '#4fc3f7',
-      series: [{ key: 'mem_used', color: '#4fc3f7', fill: true }], autoMinTop: 1 },
-    { key: 'power', label: '功耗', hex: '#ffb74d',
-      series: [{ key: 'power', color: '#ffb74d', fill: true }], autoMinTop: 10 },
+    { key: 'cpu', label: 'CPU 占用', hex: '#111111',
+      series: [{ key: 'cpu', color: '#111111', fill: true }], fixed: [0, 100] },
+    { key: 'mem', label: '内存', hex: '#6f6c66',
+      series: [{ key: 'mem_used', color: '#6f6c66', fill: true }], autoMinTop: 1 },
+    { key: 'power', label: '功耗', hex: '#3a3a3a',
+      series: [{ key: 'power', color: '#3a3a3a', fill: true }], autoMinTop: 10 },
     { key: 'net', label: '网速', hex: null,
-      series: [{ key: 'net_down', color: '#3ddc97', fill: false },
-               { key: 'net_up', color: '#ff6b9d', fill: false }], autoMinTop: 4096 },
-    { key: 'disk', label: '磁盘剩余', hex: '#ffd54f', bar: true }
+      series: [{ key: 'net_down', color: '#111111', fill: false },
+               { key: 'net_up', color: '#8a8782', fill: false }], autoMinTop: 4096 },
+    { key: 'disk', label: '磁盘剩余', hex: '#3a3a3a', bar: true }
   ];
 
   var charts = {};
@@ -48,7 +48,7 @@
       if (spec.key === 'net') {
         var wrap = document.createElement('div');
         wrap.className = 'net-values';
-        [['down', '下载', '#3ddc97'], ['up', '上传', '#ff6b9d']].forEach(function (item) {
+        [['down', '下载', '#111111'], ['up', '上传', '#8a8782']].forEach(function (item) {
           var line = document.createElement('div');
           line.className = 'net-line';
           var mark = document.createElement('span');

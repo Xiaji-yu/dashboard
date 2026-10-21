@@ -14,7 +14,7 @@
 
 (function () {
   var SERIES_PARAM = 'cpu,cpu_max,temp,temp_acpi,fan_cpu';
-  var GROUP_COLORS = ['#3ddc97', '#4fc3f7', '#ffb74d', '#ff6b9d'];
+  var GROUP_COLORS = ['#111111', '#3a3a3a', '#6f6c66', '#a8a49c'];
   var BATT_STATUS = {
     'Charging': '充电中',
     'Discharging': '放电中',
@@ -36,12 +36,12 @@
     top.className = 'perf-top';
     top.innerHTML =
       '<div class="perf-top-left">' +
-        '<div class="card-title"><span class="tick" style="background:#3ddc97"></span>CPU 占用</div>' +
+        '<div class="card-title"><span class="tick" style="background:#111111"></span>CPU 占用</div>' +
         '<div class="big-value"><span id="v-cpu">—</span></div>' +
         '<div class="core-groups" id="core-groups"></div>' +
         '<div class="side-note dim" id="thread-note">—</div>' +
         '<div class="side-note push-bottom" id="gpu-note">' +
-          '<span class="tick" style="background:#ffd54f"></span>GPU 频率 ' +
+          '<span class="tick" style="background:#8a8782"></span>GPU 频率 ' +
           '<b id="v-gpu">—</b><span class="dim" id="s-gpu"></span>' +
         '</div>' +
       '</div>' +
@@ -50,8 +50,8 @@
         '<div class="big-chart" id="c-cpu"></div>' +
         '<div class="chart-foot">' +
           '<span class="legend">' +
-            '<i style="background:#3ddc97"></i>CPU 占用' +
-            '<i style="background:#8d84a6"></i>最高单核' +
+            '<i style="background:#111111"></i>CPU 占用' +
+            '<i style="background:#8a8782"></i>最高单核' +
           '</span>' +
           '<span>最近 2 分钟</span>' +
         '</div>' +
@@ -91,17 +91,17 @@
     host.appendChild(bottom);
 
     charts.cpu = window.createChart(document.getElementById('c-cpu'), {
-      series: [{ key: 'cpu', color: '#3ddc97', fill: true },
-               { key: 'cpu_max', color: '#8d84a6', fill: false, width: 1.5 }],
+      series: [{ key: 'cpu', color: '#111111', fill: true },
+               { key: 'cpu_max', color: '#8a8782', fill: false, width: 1.5 }],
       fixed: [0, 100], window: WINDOW_SECONDS
     });
     charts.temp = window.createChart(document.getElementById('c-temp'), {
-      series: [{ key: 'temp', color: '#ff8a65', fill: true },
-               { key: 'temp_acpi', color: '#ce93d8', fill: false, width: 1.5 }],
+      series: [{ key: 'temp', color: '#3a3a3a', fill: true },
+               { key: 'temp_acpi', color: '#a8a49c', fill: false, width: 1.5 }],
       fixed: [0, 100], window: WINDOW_SECONDS
     });
     charts.fan = window.createChart(document.getElementById('c-fan'), {
-      series: [{ key: 'fan_cpu', color: '#4fc3f7', fill: true }],
+      series: [{ key: 'fan_cpu', color: '#6f6c66', fill: true }],
       autoMinTop: 600, window: WINDOW_SECONDS
     });
 
@@ -191,9 +191,9 @@
   }
 
   function tempColor(celsius) {
-    if (celsius >= 85) return '#ff6b9d';
-    if (celsius >= 70) return '#ffb74d';
-    return '#3ddc97';
+    if (celsius >= 85) return '#9c3222';
+    if (celsius >= 70) return '#6f6c66';
+    return '#111111';
   }
 
   function renderTemps(temps) {
@@ -314,10 +314,10 @@
     /* Linux 经典口径：总量 = 进程与内核 + 缓冲 + 缓存 + 空闲（不重叠，正好加满） */
     var appGb = Math.max(0, mem.total_gb - mem.free_gb - mem.buffers_gb - mem.cached_gb);
     var segments = [
-      { label: '应用与内核', value: appGb, color: '#4fc3f7' },
-      { label: '缓冲', value: mem.buffers_gb, color: '#9575cd' },
-      { label: '缓存', value: mem.cached_gb, color: '#81c784' },
-      { label: '空闲', value: mem.free_gb, color: 'rgba(255,255,255,0.08)' }
+      { label: '应用与内核', value: appGb, color: '#6f6c66' },
+      { label: '缓冲', value: mem.buffers_gb, color: '#3a3a3a' },
+      { label: '缓存', value: mem.cached_gb, color: '#8a8782' },
+      { label: '空闲', value: mem.free_gb, color: 'rgba(17,17,17,0.07)' }
     ];
     var total = mem.total_gb || 1;
     stack.innerHTML = segments.map(function (seg) {
@@ -328,7 +328,7 @@
       return '<span><i style="background:' + seg.color + '"></i>' + seg.label + ' ' +
         seg.value.toFixed(1) + ' GB</span>';
     });
-    items.push('<span><i style="background:#ff6b9d"></i>交换 ' +
+    items.push('<span><i style="background:#9c3222"></i>交换 ' +
       mem.swap_used_gb.toFixed(1) + ' GB</span>');
     legend.innerHTML = items.join('');
     document.getElementById('mem-note').textContent = '已用 ' + mem.percent.toFixed(0) + '%';
