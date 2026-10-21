@@ -502,6 +502,9 @@ body {
 
   .side-btn#pause { margin-left: auto; }
 
+  /* 手机顶栏放不下第三个按钮；账号弹窗里仍有「退出登录」 */
+  #logout { display: none; }
+
   /* 页签横向滑动 */
   .nav {
     order: 3;
