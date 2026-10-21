@@ -110,6 +110,28 @@ dashboard.example.com {
 }
 ```
 
+要挂到已有站点的子路径（如 `https://example.com/dashboard`）也可以，但要让代理**保留前缀**转发，
+并传上 `X-Forwarded-For` / `X-Forwarded-Proto`——看板会自己识别前缀，不用改环境变量。
+Nginx 示例：
+
+```nginx
+location = /dashboard {
+    return 301 /dashboard/;
+}
+location /dashboard/ {
+    proxy_pass http://127.0.0.1:8282;     # 不要带 URI，保留 /dashboard 前缀
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+> `proxy_pass` 写成 `http://127.0.0.1:8282/`（带尾斜杠）会把前缀吃掉，看板会按根路径生成
+> 链接、重定向和 Cookie，跳转又会落回主站——不要用这种写法。
+
+看板根据 `X-Forwarded-For` / `X-Forwarded-Proto` 自动识别前缀；如果网关不传这些头，
+再在 unit 里加 `Environment=DASHBOARD_BASE_PATH=/dashboard` 即可。
+
 两件必须一起做的事：
 
 1. 把 unit 里的 `DASHBOARD_HOST` 改成 `127.0.0.1`，让看板只监听回环；

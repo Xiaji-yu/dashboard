@@ -87,6 +87,39 @@ def client_ip(headers, peer, trust=False):
                 return first
     return peer
 
+
+BASE_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+
+
+def valid_base_path(path):
+    """前缀只允许 URL 路径安全字符，且不能含空段或 . / .. 段。
+
+    这个值会写进 HTML 的 window.DASH_BASE 和 Cookie 的 Path，来自请求路径时
+    必须严格校验，否则构造过的 URL 可能把引号/尖括号带进页面。
+    """
+    if not path.startswith("/") or path == "/":
+        return False
+    for segment in path[1:].split("/"):
+        if segment in ("", ".", "..") or not BASE_PATH_SEGMENT_RE.fullmatch(segment):
+            return False
+    return True
+
+
+def normalize_base_path(raw):
+    """把 DASHBOARD_BASE_PATH 规范成 "" 或 "/xxx"（无尾斜杠）。
+
+    这是显式覆盖项：不设时服务端会自动从请求路径推断反向代理前缀。
+    空值或非法值都表示挂在根路径。
+    """
+    raw = (raw or "").strip()
+    if not raw or raw == "/":
+        return ""
+    if not raw.startswith("/"):
+        raw = "/" + raw
+    raw = raw.rstrip("/")
+    return raw if valid_base_path(raw) else ""
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 静态资源必须走 resource_dir()：打包成 onefile exe 后它们是解包到临时目录的，
 # 用 __file__ 拼路径会指向不存在的目录
@@ -94,6 +127,62 @@ STATIC_DIR = os.path.join(resource_dir(), "static")
 HOST = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DASHBOARD_PORT", "8282"))
 INTERVAL = float(os.environ.get("DASHBOARD_INTERVAL", "1.0"))
+BASE_PATH = normalize_base_path(os.environ.get("DASHBOARD_BASE_PATH", ""))
+
+# 自动识别前缀时用来切分的路标：这些段只可能属于看板自己
+ROUTE_MARKERS = ("/api/", "/static/")
+PAGE_SUFFIXES = ("/login", "/index.html")
+
+
+def _split_base_path(path, base_path, proxied):
+    if base_path:
+        if path == base_path or path == base_path + "/":
+            return base_path, "/"
+        if path.startswith(base_path + "/"):
+            return base_path, path[len(base_path):]
+        return None, None
+
+    for marker in ROUTE_MARKERS:
+        index = path.find(marker)
+        if index == 0:
+            return "", path
+        if index > 0:
+            return path[:index], path[index:]
+    for suffix in PAGE_SUFFIXES:
+        if path.endswith(suffix) and len(path) > len(suffix):
+            return path[:-len(suffix)], suffix
+    if path in PAGE_SUFFIXES:
+        return "", path
+    if path == "/":
+        return "", "/"
+    if not proxied:
+        return "", path
+    if path.endswith("/"):
+        return path.rstrip("/"), "/"
+    if "/" not in path[1:] and "." not in path[1:]:
+        # 单段、无扩展名且经过代理：视为代理前缀下的入口（例如 /dashboard）
+        return path, "/"
+    return "", path
+
+
+def split_base_path(path, base_path=None, proxied=False):
+    """把请求路径拆成 (反向代理前缀, 站内路径)；显式前缀下不匹配时返回 (None, None)。
+
+    反向代理保留前缀转发时（如 /dashboard/api/overview），路径本身就带着前缀：
+    从 /api/ 或 /static/ 这类路标往前切即可。入口 /dashboard 没有路标，
+    只有在请求经过代理（带 X-Forwarded-* 头）时才按「单段、无扩展名」识别，
+    避免把直接访问时真正的 404（如 /definitely-not-here）错当成应用入口。
+
+    显式配置了 DASHBOARD_BASE_PATH 时只认它，不做任何猜测。
+    推断出的前缀必须通过字符集校验，否则按根路径处理（防止注入 HTML/Cookie）。
+    """
+    if base_path is None:
+        base_path = BASE_PATH
+    prefix, inner = _split_base_path(path, base_path, proxied)
+    if prefix and not valid_base_path(prefix):
+        return "", path
+    return prefix, inner
+
 
 # 曲线序列：键 -> 取自快照的哪个字段
 SERIES_KEYS = ("cpu", "mem_used", "power", "net_down", "net_up", "disk_free", "temp",
@@ -218,8 +307,24 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     collector = None
     auth = None
+    _prefix = ""          # 本次请求推断出的代理前缀，由 _current_path() 填充
 
     # ---------------- 路由 ----------------
+
+    def _current_path(self):
+        """当前请求的站内路径（去掉代理前缀）；显式前缀下不匹配时返回 None。"""
+        raw = unquote(urlparse(self.path).path)
+        header_prefix = normalize_base_path(self.headers.get("X-Forwarded-Prefix") or "")
+        if header_prefix:
+            # 代理显式告知了挂载路径，最准确，不做任何猜测
+            self._prefix, path = split_base_path(raw, header_prefix)
+        else:
+            proxied = bool(self.headers.get("X-Forwarded-For")
+                           or self.headers.get("X-Forwarded-Proto")
+                           or self.headers.get("X-Real-IP"))
+            self._prefix, path = split_base_path(raw, proxied=proxied)
+        self._prefix = self._prefix or ""
+        return path
 
     # ---------------- 鉴权 ----------------
 
@@ -259,16 +364,22 @@ class Handler(BaseHTTPRequestHandler):
         return {"error": "read_only",
                 "message": "该只读令牌不能执行写操作（改密码/退出/管理令牌请用页面登录）"}
 
-    @staticmethod
-    def _session_cookie(token):
-        return (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; "
+    def _cookie_path(self):
+        return self._prefix or BASE_PATH or "/"
+
+    def _session_cookie(self, token):
+        return (f"{SESSION_COOKIE}={token}; Path={self._cookie_path()}; HttpOnly; SameSite=Lax; "
                 f"Max-Age={SESSION_TTL}")
 
-    @staticmethod
-    def _clear_cookie():
-        return f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+    def _clear_cookie(self):
+        return (f"{SESSION_COOKIE}=; Path={self._cookie_path()}; HttpOnly; SameSite=Lax; Max-Age=0")
 
     def _redirect(self, location):
+        # 站内绝对路径要带上代理前缀，否则 /login 会被浏览器解析成主站根路径
+        prefix = self._prefix or BASE_PATH
+        if prefix and location.startswith("/") and not location.startswith(prefix + "/") \
+                and location != prefix:
+            location = prefix + location
         self.send_response(302)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
@@ -332,8 +443,10 @@ class Handler(BaseHTTPRequestHandler):
         return origin.split("//")[-1].rstrip("/") == host
 
     def do_POST(self):
-        path = unquote(urlparse(self.path).path)
+        path = self._current_path()
         raw = self._read_body()          # 无论结果如何都要读掉，避免密码被当成请求行回显到日志
+        if path is None:
+            return self.send_error(404)
         if path not in ("/api/login", "/api/logout", "/api/password",
                         "/api/tokens", "/api/tokens/revoke"):
             return self.send_error(404)
@@ -418,7 +531,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = unquote(parsed.path)
+        path = self._current_path()
+
+        if path is None:
+            return self.send_error(404)
 
         # 登录页与它的资源不需要鉴权
         if path in ("/static/style.css", "/static/login.js"):
@@ -597,6 +713,9 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
             ctype += "; charset=utf-8"
+        # HTML 里的资源与接口路径用 __DASH_BASE__ 占位；挂在子路径时替换成实际前缀
+        if path.endswith(".html"):
+            body = body.replace(b"__DASH_BASE__", (self._prefix or BASE_PATH).encode("utf-8"))
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))

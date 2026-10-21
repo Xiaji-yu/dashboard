@@ -2,6 +2,7 @@
 'use strict';
 
 (function () {
+  var BASE = window.DASH_BASE || '';
   var form = document.getElementById('login-form');
   var userInput = document.getElementById('login-user');
   var passInput = document.getElementById('login-pass');
@@ -18,11 +19,11 @@
   }
 
   /* 已经登录过就直接进看板；顺便把主机名显示出来 */
-  fetch('/api/auth', { cache: 'no-store' })
+  fetch(BASE + '/api/auth', { cache: 'no-store' })
     .then(function (res) { return res.json(); })
     .then(function (data) {
       showHost(data.host);
-      if (data.authenticated) window.location.replace('/');
+      if (data.authenticated) window.location.replace(BASE + '/');
     })
     .catch(function () { /* 服务没起来时保持登录页 */ });
 
@@ -31,7 +32,7 @@
     showError('');
     submit.disabled = true;
     submit.textContent = '登录中…';
-    fetch('/api/login', {
+    fetch(BASE + '/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store',
@@ -42,7 +43,7 @@
       });
     }).then(function (result) {
       if (result.status === 200 && result.data.ok) {
-        window.location.replace('/');
+        window.location.replace(BASE + '/');
         return;
       }
       showError(result.data.message || '登录失败，请重试');

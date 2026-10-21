@@ -807,5 +807,174 @@ class ApiTokenFlowTest(unittest.TestCase):
         self.assertIn("token=<redacted>", log)
 
 
+class BasePathTest(unittest.TestCase):
+    """反向代理子路径部署：自动/显式前缀、重定向和 Cookie。"""
+
+    PASSWORD = "sub-path-pass-1"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        auth = AuthStore(os.path.join(tmp.name, "auth.json"), username="tester",
+                         password=self.PASSWORD, logger=lambda message: None)
+        collector = Collector()
+        collector.sample()
+        self.httpd = server.create_server(collector, "127.0.0.1", 0, auth=auth)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        self.port = self.httpd.server_address[1]
+
+    def _raw(self, method, path, payload=None, cookie=None, forwarded=True,
+             extra_headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            headers = dict(extra_headers or {})
+            if cookie:
+                headers["Cookie"] = cookie
+            if forwarded:
+                # 模拟 nginx：保留前缀转发，同时带上代理头
+                headers["X-Forwarded-For"] = "203.0.113.9"
+                headers["X-Forwarded-Proto"] = "https"
+            body = None
+            if payload is not None:
+                body = json.dumps(payload).encode("utf-8")
+                headers["Content-Type"] = "application/json"
+            conn.request(method, path, body=body, headers=headers)
+            response = conn.getresponse()
+            return (response.status,
+                    {key.lower(): value for key, value in response.getheaders()},
+                    response.read())
+        finally:
+            conn.close()
+
+    def _check_subpath(self):
+        """挂在前缀下时，未登录跳转、静态资源、登录 Cookie 都要带着前缀。"""
+        status, headers, _body = self._raw("GET", "/dashboard")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["location"], "/dashboard/login")
+
+        status, _headers, body = self._raw("GET", "/dashboard/login")
+        self.assertEqual(status, 200)
+        html = body.decode("utf-8")
+        self.assertIn("/dashboard/static/style.css", html)
+        self.assertIn("/dashboard/static/login.js", html)
+        self.assertIn('action="/dashboard/api/login"', html)
+        self.assertNotIn("__DASH_BASE__", html)
+
+        self.assertEqual(self._raw("GET", "/dashboard/static/style.css")[0], 200)
+        self.assertEqual(self._raw("GET", "/dashboard/api/auth")[0], 200)
+
+        status, headers, _body = self._raw("POST", "/dashboard/api/login",
+                                           {"username": "tester", "password": self.PASSWORD})
+        self.assertEqual(status, 200)
+        set_cookie = headers.get("set-cookie", "")
+        self.assertIn("Path=/dashboard", set_cookie)
+        cookie = set_cookie.split(";")[0]
+
+        status, _headers, body = self._raw("GET", "/dashboard/api/auth", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["authenticated"])
+
+        status, _headers, body = self._raw("GET", "/dashboard/", cookie=cookie)
+        self.assertEqual(status, 200)
+        html = body.decode("utf-8")
+        self.assertIn("/dashboard/static/app.js", html)
+        self.assertIn('window.DASH_BASE = "/dashboard"', html)
+        self.assertNotIn("__DASH_BASE__", html)
+
+        status, headers, _body = self._raw("GET", "/dashboard/login", cookie=cookie)
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["location"], "/dashboard/")
+
+    def test_normalize_base_path(self):
+        self.assertEqual(server.normalize_base_path(""), "")
+        self.assertEqual(server.normalize_base_path("/"), "")
+        self.assertEqual(server.normalize_base_path("dashboard/"), "/dashboard")
+        self.assertEqual(server.normalize_base_path("/dashboard/"), "/dashboard")
+
+    def test_split_base_path_explicit(self):
+        self.assertEqual(server.split_base_path("/dashboard", "/dashboard"), ("/dashboard", "/"))
+        self.assertEqual(server.split_base_path("/dashboard/", "/dashboard"), ("/dashboard", "/"))
+        self.assertEqual(server.split_base_path("/dashboard/api/overview", "/dashboard"),
+                         ("/dashboard", "/api/overview"))
+        self.assertEqual(server.split_base_path("/", "/dashboard"), (None, None))
+        self.assertEqual(server.split_base_path("/api/overview", "/dashboard"), (None, None))
+        self.assertEqual(server.split_base_path("/dashboardx", "/dashboard"), (None, None))
+
+    def test_split_base_path_auto(self):
+        # 根路径部署：所有已知路由都保持原样
+        self.assertEqual(server.split_base_path("/", ""), ("", "/"))
+        self.assertEqual(server.split_base_path("/login", ""), ("", "/login"))
+        self.assertEqual(server.split_base_path("/index.html", ""), ("", "/index.html"))
+        self.assertEqual(server.split_base_path("/api/overview", ""), ("", "/api/overview"))
+        self.assertEqual(server.split_base_path("/static/app.js", ""), ("", "/static/app.js"))
+        self.assertEqual(server.split_base_path("/favicon.ico", ""), ("", "/favicon.ico"))
+        # 保留前缀转发：从路径本身推断 /dashboard（入口需要代理头，避免误伤 404）
+        self.assertEqual(server.split_base_path("/dashboard", ""), ("", "/dashboard"))
+        self.assertEqual(server.split_base_path("/definitely-not-here", ""),
+                         ("", "/definitely-not-here"))
+        self.assertEqual(server.split_base_path("/dashboard", "", proxied=True),
+                         ("/dashboard", "/"))
+        self.assertEqual(server.split_base_path("/dashboard/", "", proxied=True),
+                         ("/dashboard", "/"))
+        self.assertEqual(server.split_base_path("/dashboard/login", ""),
+                         ("/dashboard", "/login"))
+        self.assertEqual(server.split_base_path("/dashboard/index.html", ""),
+                         ("/dashboard", "/index.html"))
+        self.assertEqual(server.split_base_path("/dashboard/api/overview", ""),
+                         ("/dashboard", "/api/overview"))
+        self.assertEqual(server.split_base_path("/dashboard/static/app.js", ""),
+                         ("/dashboard", "/static/app.js"))
+        # 多层前缀也能识别
+        self.assertEqual(server.split_base_path("/apps/dash/api/overview", ""),
+                         ("/apps/dash", "/api/overview"))
+
+    def test_rejects_unsafe_prefix(self):
+        # 前缀会写进 HTML 与 Cookie，带引号/尖括号/.. 的路径不能被当成前缀
+        self.assertEqual(server.normalize_base_path('/a"><script>'), "")
+        self.assertEqual(server.normalize_base_path("/a/../b"), "")
+        for path in ('/"> <script>/api/x', "/../api/x", '/dashboard"/api/x'):
+            self.assertEqual(server.split_base_path(path, ""), ("", path), path)
+
+    def test_subpath_routing_auto_detected(self):
+        with mock.patch.object(server, "BASE_PATH", ""):
+            self._check_subpath()
+
+            # 根路径部署不能被自动识别弄坏
+            status, headers, _body = self._raw("GET", "/")
+            self.assertEqual(status, 302)
+            self.assertEqual(headers["location"], "/login")
+            status, _headers, body = self._raw("GET", "/login")
+            self.assertEqual(status, 200)
+            html = body.decode("utf-8")
+            self.assertIn('src="/static/login.js"', html)
+            self.assertNotIn("__DASH_BASE__", html)
+            self.assertEqual(self._raw("GET", "/api/auth")[0], 200)
+
+            # 直接访问（没经过代理）时，未知路径不会被当成入口
+            status, headers, _body = self._raw("GET", "/definitely-not-here",
+                                               forwarded=False)
+            self.assertEqual(status, 302)
+            self.assertEqual(headers["location"], "/login")
+
+    def test_subpath_routing_explicit_base(self):
+        with mock.patch.object(server, "BASE_PATH", "/dashboard"):
+            self._check_subpath()
+            # 显式配置时前缀之外的请求不归看板管
+            self.assertEqual(self._raw("GET", "/")[0], 404)
+
+    def test_forwarded_prefix_header_wins(self):
+        with mock.patch.object(server, "BASE_PATH", ""):
+            status, _headers, body = self._raw(
+                "GET", "/deploy/dash/login", forwarded=False,
+                extra_headers={"X-Forwarded-Prefix": "/deploy/dash"})
+            self.assertEqual(status, 200)
+            html = body.decode("utf-8")
+            self.assertIn("/deploy/dash/static/style.css", html)
+            self.assertEqual(self._raw("GET", "/deploy/dash/api/auth", forwarded=False,
+                                       extra_headers={"X-Forwarded-Prefix": "/deploy/dash"})[0], 200)
+
+
 if __name__ == "__main__":
     unittest.main()

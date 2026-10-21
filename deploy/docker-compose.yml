@@ -25,6 +25,9 @@ services:
       DASHBOARD_HOST: 0.0.0.0
       DASHBOARD_PORT: 8282
       DASHBOARD_INTERVAL: 1.0
+      # 反向代理挂在子路径时自动识别，一般不用配置；
+      # 代理不传 X-Forwarded-* 头时才需要显式指定：
+      # DASHBOARD_BASE_PATH: /dashboard
       # 凭据放数据卷，容器重建也不丢
       DASHBOARD_AUTH_FILE: /data/auth.json
       # 想指定初始账密就打开（只在凭据文件不存在时生效）

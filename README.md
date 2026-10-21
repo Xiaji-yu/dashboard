@@ -138,10 +138,30 @@ ssh -L 8282:127.0.0.1:8282 user@server      # 本地打开 http://127.0.0.1:8282
 | `DASHBOARD_PASSWORD` | 随机 20 位 | 初始密码（同上；留空则随机生成并打印到日志） |
 | `DASHBOARD_API_TOKEN` | 无 | 启动时播种一个只读令牌（**仅在还没有任何令牌时生效**），适合容器/脚本下发 |
 | `DASHBOARD_TRUST_PROXY` | 关 | 置 1 时采信 `X-Forwarded-For`（反代后必须开，否则限速会算成代理一个 IP） |
+| `DASHBOARD_BASE_PATH` | 自动识别 | 一般不用设；仅当反向代理没有传 `X-Forwarded-*` 头时，才用它显式指定子路径 |
 
 ```bash
 DASHBOARD_PORT=9000 DASHBOARD_HOST=127.0.0.1 ./run.sh start
 ```
+
+**挂在子路径上**（例如 `https://example.com/dashboard`）：反向代理只要**保留前缀**转发，并传上
+`X-Forwarded-For` / `X-Forwarded-Proto`，看板就会自动识别出 `/dashboard` 前缀，
+把重定向、静态资源、接口和会话 Cookie 都按它拼好，**不需要改环境变量**。Nginx 示例：
+
+```nginx
+location = /dashboard {
+    return 301 /dashboard/;
+}
+location /dashboard/ {
+    proxy_pass http://127.0.0.1:8282;     # 注意不要带 URI，保留 /dashboard 前缀
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+如果代理不传 `X-Forwarded-*`（例如某些精简网关），再设 `DASHBOARD_BASE_PATH=/dashboard` 即可；
+不设该变量且直接访问根路径时，看板行为与以前完全一致。
 
 ### 账号与会话
 

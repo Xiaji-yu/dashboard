@@ -5,11 +5,12 @@
 <title>登录 · 总控台</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#17111f">
-<link rel="stylesheet" href="/static/style.css">
+<script>window.DASH_BASE = "__DASH_BASE__";</script>
+<link rel="stylesheet" href="__DASH_BASE__/static/style.css">
 </head>
 <body class="login-body">
 <main class="login-wrap">
-  <form class="login-card" id="login-form" method="post" action="/api/login">
+  <form class="login-card" id="login-form" method="post" action="__DASH_BASE__/api/login">
     <div class="login-brand">
       <span class="dot" id="login-dot"></span>
       <span id="login-host">总控台</span>
@@ -35,6 +36,6 @@
     </p>
   </form>
 </main>
-<script src="/static/login.js"></script>
+<script src="__DASH_BASE__/static/login.js"></script>
 </body>
 </html>

@@ -29,6 +29,10 @@ WorkingDirectory=/home/xiaji/code/dashboard
 Environment=DASHBOARD_HOST=0.0.0.0
 Environment=DASHBOARD_PORT=8282
 Environment=DASHBOARD_INTERVAL=1.0
+# 反向代理挂在子路径时（如 https://example.com/dashboard）不需要配置：
+# 看板会根据 X-Forwarded-* 头自动识别前缀。
+# 只有代理不传这些头时，才需要显式指定：
+# Environment=DASHBOARD_BASE_PATH=/dashboard
 # 账号：首次启动会自动生成随机密码并打印到日志（journalctl -u dashboard 查看），
 # 想指定初始账密就打开下面两行（只在凭据文件还不存在时生效）。
 # Environment=DASHBOARD_USER=admin

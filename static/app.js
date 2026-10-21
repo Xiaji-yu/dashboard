@@ -6,6 +6,14 @@
 
 var WINDOW_SECONDS = 120;
 
+/* 反向代理把看板挂在子路径时（如 /dashboard），静态资源与接口都要带上该前缀；
+   根路径部署时 DASH_BASE 为空，行为与以前一致。 */
+var DASH_BASE = window.DASH_BASE || '';
+
+function basePath(url) {
+  return DASH_BASE + url;
+}
+
 window.DashPages = window.DashPages || {};
 
 var PAGE_TITLES = {
@@ -94,9 +102,9 @@ function setLive(text, mode) {
 }
 
 function fetchJSON(url, options) {
-  return fetch(url, Object.assign({ cache: 'no-store' }, options || {})).then(function (res) {
+  return fetch(basePath(url), Object.assign({ cache: 'no-store' }, options || {})).then(function (res) {
     if (res.status === 401) {
-      window.location.replace('/login');   // 会话过期：回登录页
+      window.location.replace(basePath('/login'));   // 会话过期：回登录页
       throw new Error('unauthorized');
     }
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -106,14 +114,14 @@ function fetchJSON(url, options) {
 
 /* 表单提交用：返回 {status, data}，401 同样跳登录页 */
 function postJSON(url, body) {
-  return fetch(url, {
+  return fetch(basePath(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     cache: 'no-store',
     body: JSON.stringify(body || {})
   }).then(function (res) {
     if (res.status === 401) {
-      window.location.replace('/login');
+      window.location.replace(basePath('/login'));
       throw new Error('unauthorized');
     }
     return res.json().catch(function () { return {}; }).then(function (data) {
@@ -207,7 +215,7 @@ function activate(id) {
 
   /* 按需加载页面模块；404 或未注册则显示建设中 */
   var script = document.createElement('script');
-  script.src = '/static/pages/' + id + '.js';
+  script.src = basePath('/static/pages/' + id + '.js');
   script.onload = function () {
     if (state.page !== id) return;  // 用户已切到别的页面
     if (DashPages[id]) mountPage(id, host);
@@ -401,14 +409,14 @@ pollBadges();
 
   document.getElementById('account-logout').addEventListener('click', function () {
     postJSON('/api/logout', {}).then(function () {
-      window.location.replace('/login');
-    }).catch(function () { window.location.replace('/login'); });
+      window.location.replace(basePath('/login'));
+    }).catch(function () { window.location.replace(basePath('/login')); });
   });
 
   document.getElementById('account-logout-all').addEventListener('click', function () {
     postJSON('/api/logout', { all: true }).then(function () {
-      window.location.replace('/login');
-    }).catch(function () { window.location.replace('/login'); });
+      window.location.replace(basePath('/login'));
+    }).catch(function () { window.location.replace(basePath('/login')); });
   });
 })();
 
