@@ -84,7 +84,9 @@ case "${1:-start}" in
     if [[ -n "$pid" ]]; then
       kill "$pid" 2>/dev/null || true
       sleep 0.5
-      kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
       rm -f "$PID_FILE"
       echo "已停止（PID $pid）"
     else

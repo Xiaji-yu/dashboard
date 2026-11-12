@@ -63,8 +63,9 @@ while (($#)); do
   esac
 done
 
-[[ "$PORT" =~ ^[0-9]+$ ]] && ((PORT >= 1 && PORT <= 65535)) \
-  || die "端口不合法：$PORT"
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
+  die "端口不合法：$PORT"
+fi
 [[ "$HOST" =~ ^[A-Za-z0-9:._-]+$ ]] || die "监听地址不合法：$HOST"
 if [[ -n "$BASE_PATH" ]]; then
   [[ "$BASE_PATH" == /?* && "$BASE_PATH" != */ ]] \

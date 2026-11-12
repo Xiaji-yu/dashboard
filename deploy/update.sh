@@ -216,8 +216,9 @@ journal_tail() {
 }
 
 health() {
-  local i
-  for i in $(seq 1 15); do
+  local i=0
+  while [ "$i" -lt 15 ]; do
+    i=$((i + 1))
     if "$PY" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3).read(1)' \
         "$HEALTH_URL" >/dev/null 2>&1; then
       return 0
