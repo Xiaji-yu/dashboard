@@ -1,0 +1,138 @@
+name: 代码审查
+
+# 对 PR 做四类自动审查：密钥泄漏、依赖漏洞、Shell 脚本问题、AI 评审（可选）。
+# 结果汇总成一条 PR 评论（重复运行会先删掉上一条，不刷屏）。
+# 密钥扫描 / 依赖漏洞 / shellcheck 有问题会让本 workflow 失败；AI 评审仅给建议，不阻塞。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: 自动审查
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 记录对比基准
+        id: base
+        run: echo "ref=origin/${{ github.base_ref || 'main' }}" >> "$GITHUB_OUTPUT"
+
+      # 仓库里的密钥/口令一旦提交就视为泄漏，直接判失败
+      - name: 密钥扫描（gitleaks）
+        id: leaks
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 依赖漏洞（pip-audit）
+        id: pip_audit
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          out="$(pip-audit -r requirements.txt 2>&1)"; rc=$?
+          {
+            echo "### 依赖漏洞（pip-audit）"
+            echo
+            echo '```text'
+            echo "$out"
+            echo '```'
+          } > /tmp/review-pip.md
+          test "$rc" -eq 0
+
+      - name: Shell 脚本检查（shellcheck）
+        id: shell
+        continue-on-error: true
+        run: |
+          git diff --name-only --diff-filter=ACMRT \
+              "${{ steps.base.outputs.ref }}...HEAD" > /tmp/changed.txt || true
+          {
+            grep -E '\.sh$' /tmp/changed.txt || true
+            # 一次没改 shell 也要兜底检查这三个，防止漏检
+            echo run.sh
+            echo deploy/install.sh
+            echo deploy/update.sh
+          } | sort -u > /tmp/sh-files.txt
+          out="$(shellcheck $(cat /tmp/sh-files.txt) 2>&1)"; rc=$?
+          {
+            echo "### Shell 脚本（shellcheck）"
+            echo
+            echo '```text'
+            echo "$out"
+            echo '```'
+          } > /tmp/review-shell.md
+          test "$rc" -eq 0
+
+      # 可选：配置仓库密钥 REVIEW_LLM_API_KEY 后启用。
+      # 默认走智谱开放平台（glm-4.6），可用变量 REVIEW_LLM_BASE_URL / REVIEW_LLM_MODEL 换其他 OpenAI 兼容服务。
+      - name: AI 评审（可选）
+        id: ai
+        continue-on-error: true
+        if: env.REVIEW_LLM_API_KEY != ''
+        env:
+          REVIEW_LLM_API_KEY: ${{ secrets.REVIEW_LLM_API_KEY }}
+          REVIEW_LLM_BASE_URL: ${{ vars.REVIEW_LLM_BASE_URL }}
+          REVIEW_LLM_MODEL: ${{ vars.REVIEW_LLM_MODEL }}
+        run: |
+          git diff "${{ steps.base.outputs.ref }}...HEAD" > /tmp/review.diff
+          base="${REVIEW_LLM_BASE_URL:-https://open.bigmodel.cn/api/paas/v4}"
+          model="${REVIEW_LLM_MODEL:-glm-4.6}"
+          python3 tools/ai_review.py --base "$base" --model "$model" \
+            --diff /tmp/review.diff --out /tmp/review-ai.md
+
+      - name: 汇总并发表评审评论
+        if: always() && github.event.pull_request.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "<!-- auto-review -->
+          ## 🤖 自动代码审查
+          "
+            for f in /tmp/review-pip.md /tmp/review-shell.md /tmp/review-ai.md; do
+              [ -f "$f" ] && cat "$f" && echo
+            done
+            echo "结论："
+            echo "- 密钥扫描（gitleaks）：$([[ '${{ steps.leaks.outcome }}' == success ]] && echo 通过 || echo '**发现泄漏，必须处理**')"
+            echo "- 依赖漏洞（pip-audit）：$([[ '${{ steps.pip_audit.outcome }}' == success ]] && echo 通过 || echo '**有漏洞或检查失败，见上**')"
+            echo "- Shell 脚本（shellcheck）：$([[ '${{ steps.shell.outcome }}' == success ]] && echo 通过 || echo '**有问题，见上**')"
+            echo "- AI 评审：$([[ '${{ steps.ai.outcome }}' == success ]] && echo 已生成，见上 || echo 未启用或失败（不阻塞）)"
+          } > /tmp/review-comment.md
+
+          repo="${{ github.repository }}"
+          pr="${{ github.event.pull_request.number }}"
+          # 先删掉上一条自动评论，避免每次 PR 更新都刷一条
+          gh api "repos/$repo/issues/$pr/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- auto-review -->")) | .id' \
+          | while read -r cid; do
+              gh api -X DELETE "repos/$repo/issues/comments/$cid"
+            done
+          gh pr comment "$pr" --repo "$repo" --body-file /tmp/review-comment.md
+
+      # 汇总门禁：泄漏 / 依赖漏洞 / shellcheck 任一失败则审查不通过；AI 评审不阻塞
+      - name: 审查结论
+        if: always()
+        run: |
+          fail=0
+          [[ '${{ steps.leaks.outcome }}' == success ]] || { echo "::error title=gitleaks::检测到密钥泄漏"; fail=1; }
+          [[ '${{ steps.pip_audit.outcome }}' == success ]] || { echo "::error title=pip-audit::依赖存在已知漏洞或检查失败"; fail=1; }
+          [[ '${{ steps.shell.outcome }}' == success ]] || { echo "::error title=shellcheck::Shell 脚本有问题"; fail=1; }
+          exit $fail

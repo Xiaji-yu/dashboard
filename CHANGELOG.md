@@ -36,6 +36,20 @@
   放在仓库内的路径会被拒绝。deploy/README 新增「0.1 生产与开发分离」给出完整步骤
   （生产克隆、状态迁移、开发目录换端口、之后用生产副本的 update.sh 更新）。
 
+- **CI 门禁 + 自动代码审查**：
+  - `ci.yml` 新增 `deploy-scripts`（shellcheck + 部署脚本集成测试）与 `gate` 汇总 job
+    （建议设为分支保护的必须通过检查，即合并门禁）；
+  - 新增 `review.yml`：对每个 PR 自动做 gitleaks 密钥扫描、pip-audit 依赖漏洞、shellcheck，
+    并把结果汇总成一条 PR 评论（重复触发更新同一条）；三项任一失败审查不通过；
+  - 可选 AI 评审：配置密钥 `REVIEW_LLM_API_KEY` 后启用（`tools/ai_review.py`，默认智谱
+    `glm-4.6`，可用变量换 OpenAI 兼容服务），只给建议、不阻塞合并；
+  - 登录页回归 `tests/login.test.js`（18 例）纳入前端 job。
+- **部署脚本回归测试**：
+  - `tests/deploy/install.test.sh`（22 例）：参数校验、`--state-dir` 拒绝规则、dry-run 生成的
+    unit 内容（User/端口/状态目录两行/保留 ExecCondition 与 RAPL 预启动）、卸载 dry-run；
+  - `tests/deploy/update.test.sh`（9 例）：沙箱里用真实 git + 桩 systemd 走完整流程——unit 缺失、
+    工作目录不一致、工作区脏（`--force` 放行）、正常更新+健康检查、无更新退出、本地领先拒绝、
+    健康检查失败自动回滚并二次重启。
 - **支持打包成 Windows exe**（`deploy/build-exe.ps1` + `runtime.py`）：目标机器无需 Python/psutil。
   - `runtime.py` 区分**只读资源**与**可写数据**：打包后 static/ 走 `sys._MEIPASS`，
     而 `auth.json`/`probes.json`/日志落在 exe 同目录（不可写时退回 `%LOCALAPPDATA%\dashboard`）——

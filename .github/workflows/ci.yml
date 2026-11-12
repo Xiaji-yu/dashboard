@@ -107,3 +107,46 @@ jobs:
 
       - name: 图表库回归测试
         run: node tests/chart.test.js
+
+      - name: 登录页回归测试
+        run: node tests/login.test.js
+
+  deploy-scripts:
+    name: 部署脚本（shellcheck + 集成测试）
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu runner 自带 shellcheck
+      - name: Shell 语法与风格（shellcheck）
+        run: shellcheck run.sh deploy/install.sh deploy/update.sh
+
+      - name: install.sh 测试（参数校验 + dry-run 生成的 unit）
+        run: bash tests/deploy/install.test.sh
+
+      - name: update.sh 测试（沙箱 git + 桩 systemd，含回滚路径）
+        run: bash tests/deploy/update.test.sh
+
+  # 汇总门禁：在仓库 Settings → Branches 里把「CI / gate」设为必须通过的检查，
+  # 任何一个上游 job 失败，PR 都不能合并。
+  gate:
+    name: gate
+    needs: [test, frontend, deploy-scripts]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: 汇总门禁结果
+        run: |
+          fail=0
+          for entry in \
+            "test=${{ needs.test.result }}" \
+            "frontend=${{ needs.frontend.result }}" \
+            "deploy-scripts=${{ needs.deploy-scripts.result }}"; do
+            name="${entry%%=*}"
+            result="${entry##*=}"
+            echo "$name: $result"
+            [ "$result" = "success" ] || fail=1
+          done
+          exit $fail

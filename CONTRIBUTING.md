@@ -15,14 +15,27 @@ pip install -r requirements-dev.txt
 
 ## 本地验证
 
-提交前请确保这两条都通过：
+提交前请确保这些都通过（与 CI 门禁一致）：
 
 ```bash
-python3 -m unittest discover -v      # 287 个用例，本机约 40 秒
-node tests/chart.test.js             # 前端图表用例
-ruff check .                         # 无告警
+python3 -m unittest discover -v        # 287 个用例，本机约 40 秒
+node tests/chart.test.js               # 前端图表用例
+node tests/login.test.js               # 登录页回归（含「响应丢失不误报」路径）
+bash tests/deploy/install.test.sh      # 部署脚本：参数校验与 dry-run 生成的 unit
+bash tests/deploy/update.test.sh       # 部署脚本：沙箱集成（真实 git + 桩 systemd）
+ruff check .                           # 无告警
+shellcheck run.sh deploy/*.sh          # 需自行安装 shellcheck（CI 里必跑）
 ```
 
+## CI 门禁与代码审查
+
+- `ci.yml` 的每个 job 汇总到 **`CI / gate`**：建议在仓库 Settings → Branches → Branch protection
+  里把它设为必须通过的检查，任何一个 job 失败 PR 都无法合并。
+- `review.yml` 对每个 PR 自动审查：gitleaks 密钥扫描、pip-audit 依赖漏洞、shellcheck，
+  结果汇总成一条 PR 评论（重复触发会更新同一条，不刷屏）。这三项有问题会让审查失败。
+- AI 评审是**可选**且不阻塞：给仓库配密钥 `REVIEW_LLM_API_KEY`（默认智谱开放平台，
+  可用变量 `REVIEW_LLM_BASE_URL` / `REVIEW_LLM_MODEL` 换任何 OpenAI 兼容服务）后自动启用，
+  实现在 `tools/ai_review.py`。
 调试界面时用 `./run.sh fg` 前台运行，日志直接打在终端上。
 
 ## 代码约定
