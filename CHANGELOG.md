@@ -18,8 +18,7 @@
     服务用户对仓库有读写权限；
   - `--dry-run` 只预览生成的 unit 与将执行的命令，`--uninstall` 卸载（保留 `auth.json` 等数据），
     `--rapl-udev` 额外装 RAPL 规则；README / deploy/README 同步改写为「脚本优先、手动步骤兜底」。
-- **更新脚本 `deploy/update.sh`**（服务由 systemd 托管时用其一键更新）：
-  - `git pull --ff-only` → 按需补依赖 → 重启服务 → 请求 `/api/auth` 做健康检查；
+- **更新脚本 `deploy/update.sh`**（服务由 systemd 托管时用其一键更新）：  - `git pull --ff-only` → 按需补依赖 → 重启服务 → 请求 `/api/auth` 做健康检查；
   - **工作区有未提交改动默认拒绝更新**（`--force` 跳过），本地有未推送提交或需要合并时直接报错，
     不做合并/强推；上游远程名从 `@{u}` 推断（`origin` 或 `upstream` 都行）；
   - 健康检查失败且更新前工作区干净时**自动回滚**到更新前的提交并重启，回滚后仍不健康就打印日志；
@@ -29,6 +28,13 @@
     服务工作目录与当前仓库不一致时直接拦下，避免「拉了另一个 checkout」白忙。
   - deploy/README 补充说明「`User=` 只决定进程身份、不授予 systemctl 权限」，以及免 sudo 管理的
     sudoers 白名单 / polkit 按 unit 放行两种配置（含字面匹配、`enable` 仍要 root 等坑）。
+
+- **生产与开发分离部署**：`install.sh --state-dir DIR` 把 `DASHBOARD_AUTH_FILE` /
+  `DASHBOARD_PROBES` 写进 unit，凭据与探测目标放仓库外（`~/apps/dashboard-state/`），
+  于是生产副本可以是一份干净的 git clone，`git pull`/`update.sh` 不会因为改配置而变脏；
+  `--state-dir` 指定时自动建目录（700）、首次从旧目录迁移 `auth.json`/`probes.json`（600，已存在不覆盖），
+  放在仓库内的路径会被拒绝。deploy/README 新增「0.1 生产与开发分离」给出完整步骤
+  （生产克隆、状态迁移、开发目录换端口、之后用生产副本的 update.sh 更新）。
 
 - **支持打包成 Windows exe**（`deploy/build-exe.ps1` + `runtime.py`）：目标机器无需 Python/psutil。
   - `runtime.py` 区分**只读资源**与**可写数据**：打包后 static/ 走 `sys._MEIPASS`，

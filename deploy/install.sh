@@ -6,6 +6,7 @@
 #   sudo ./deploy/install.sh                # 也可以整条 sudo 跑，服务仍用 SUDO_USER 身份
 #   ./deploy/install.sh --port 9000         # 换端口
 #   ./deploy/install.sh --base-path /dashboard --trust-proxy   # 反向代理子路径
+#   ./deploy/install.sh --state-dir ~/apps/dashboard-state    # 生产副本：配置放到仓库外
 #   ./deploy/install.sh --rapl-udev         # 另外装 RAPL udev 规则（内核不允许 chmod 时用）
 #   ./deploy/install.sh --dry-run           # 只打印要执行的命令和生成的 unit
 #   ./deploy/install.sh --uninstall         # 卸载（保留 auth.json 等数据）
@@ -29,6 +30,7 @@ PORT="${DASHBOARD_PORT:-8282}"
 HOST="${DASHBOARD_HOST:-0.0.0.0}"
 TARGET_USER=""
 BASE_PATH=""
+STATE_DIR=""
 TRUST_PROXY=0
 RAPL_UDEV=0
 DRY_RUN=0
@@ -43,7 +45,6 @@ usage() {
   sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 0
 }
-
 # ---------- 参数 ----------
 while (($#)); do
   case "$1" in
@@ -51,6 +52,7 @@ while (($#)); do
     --port) [[ $# -ge 2 ]] || die "--port 需要端口号"; PORT="$2"; shift 2 ;;
     --host) [[ $# -ge 2 ]] || die "--host 需要监听地址"; HOST="$2"; shift 2 ;;
     --base-path) [[ $# -ge 2 ]] || die "--base-path 需要路径"; BASE_PATH="$2"; shift 2 ;;
+    --state-dir) [[ $# -ge 2 ]] || die "--state-dir 需要目录"; STATE_DIR="$2"; shift 2 ;;
     --trust-proxy) TRUST_PROXY=1; shift ;;
     --rapl-udev) RAPL_UDEV=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -67,6 +69,13 @@ done
 if [[ -n "$BASE_PATH" ]]; then
   [[ "$BASE_PATH" == /?* && "$BASE_PATH" != */ ]] \
     || die "--base-path 需要形如 /dashboard（以 / 开头、结尾不带 /）"
+fi
+if [[ -n "$STATE_DIR" ]]; then
+  STATE_DIR="${STATE_DIR/#\~/$HOME}"          # 展开 ~
+  [[ "$STATE_DIR" = /* ]] || die "--state-dir 需要绝对路径（或 ~/...）"
+  case "$STATE_DIR/" in
+    "$REPO"/*) die "--state-dir 不能放在仓库里：auth.json 会弄脏工作区，update.sh 会拒绝更新" ;;
+  esac
 fi
 
 # ---------- 运行身份 ----------
@@ -154,7 +163,7 @@ if ! ((DRY_RUN)); then
   user_exec test -r "$REPO/server.py" \
     || die "用户 $TARGET_USER 读不到 $REPO（检查目录权限）"
   user_exec test -w "$REPO" \
-    || die "用户 $TARGET_USER 对 $REPO 没有写权限（auth.json 要写在这里）"
+    || die "用户 $TARGET_USER 对 $REPO 没有写权限（auth.json / probes.json 默认落在这里；用 --state-dir 可放到仓库外）"
 fi
 
 # psutil：优先复用项目 .venv；缺了就建一个，不碰系统 pip
@@ -171,6 +180,28 @@ if ((!DRY_RUN)) && ! user_exec "$PY" -c 'import psutil' >/dev/null 2>&1; then
       || die "在 .venv 里装 psutil 失败（检查网络 / pip 配置）"
   fi
   PY="$VENV/bin/python"
+fi
+
+# 状态目录：把凭据与探测目标放到仓库外，生产副本（git clone）才能一直保持干净
+# —— update.sh 要求工作区干净，而 probes.json 在仓库里是被跟踪的，改了就算脏。
+if [[ -n "$STATE_DIR" ]]; then
+  step "准备状态目录 $STATE_DIR"
+  if ((DRY_RUN)); then
+    printf '  $ install -d -m 0700 %s\n' "$STATE_DIR"
+    for name in auth.json probes.json; do
+      [[ -e "$REPO/$name" ]] && printf '  $ install -m 0600 %s %s\n' "$REPO/$name" "$STATE_DIR/$name"
+    done
+  else
+    user_exec install -d -m 0700 "$STATE_DIR" \
+      || die "建不了状态目录 $STATE_DIR（检查父目录是否存在、是否可写）"
+    user_exec test -w "$STATE_DIR" || die "用户 $TARGET_USER 对 $STATE_DIR 没有写权限"
+    for name in auth.json probes.json; do
+      if [[ ! -e "$STATE_DIR/$name" && -e "$REPO/$name" ]]; then
+        user_exec install -m 0600 "$REPO/$name" "$STATE_DIR/$name" \
+          && say "已迁移 $name → $STATE_DIR/$name"
+      fi
+    done
+  fi
 fi
 
 # 旧实例：run.sh 起的进程会和 systemd 抢 8282；systemd 已托管的则不动
@@ -196,7 +227,8 @@ fi
 step "生成 $UNIT_PATH"
 build_unit() {
   awk -v user="$TARGET_USER" -v dir="$REPO" -v py="$PY" \
-      -v host="$HOST" -v port="$PORT" -v base="$BASE_PATH" -v trust="$TRUST_PROXY" '
+      -v host="$HOST" -v port="$PORT" -v base="$BASE_PATH" -v trust="$TRUST_PROXY" \
+      -v state="$STATE_DIR" '
     /^User=/                     { print "User=" user; next }
     /^WorkingDirectory=/         { print "WorkingDirectory=" dir; next }
     /^ExecStart=/                { print "ExecStart=" py " " dir "/server.py"; next }
@@ -206,6 +238,10 @@ build_unit() {
       print
       if (base != "") print "Environment=DASHBOARD_BASE_PATH=" base
       if (trust == "1") print "Environment=DASHBOARD_TRUST_PROXY=1"
+      if (state != "") {
+        print "Environment=DASHBOARD_AUTH_FILE=" state "/auth.json"
+        print "Environment=DASHBOARD_PROBES=" state "/probes.json"
+      }
       next
     }
     { print }
@@ -217,6 +253,10 @@ trap 'rm -f "$UNIT_TMP"' EXIT
 build_unit > "$UNIT_TMP"
 grep -q "^User=$TARGET_USER\$" "$UNIT_TMP" || die "unit 生成异常：User= 没写进去"
 grep -q "^Environment=DASHBOARD_PORT=$PORT\$" "$UNIT_TMP" || die "unit 生成异常：端口没写进去"
+if [[ -n "$STATE_DIR" ]]; then
+  grep -q "^Environment=DASHBOARD_AUTH_FILE=$STATE_DIR/auth.json\$" "$UNIT_TMP" \
+    || die "unit 生成异常：状态目录没写进去"
+fi
 
 changed=1
 if [[ -f "$UNIT_PATH" ]] && cmp -s "$UNIT_TMP" "$UNIT_PATH"; then changed=0; fi
@@ -271,6 +311,10 @@ fi
 printf '\n完成：%s 已%s并运行（用户 %s）\n' "$UNIT_NAME" \
   "$([[ $changed == 1 ]] && echo 安装/更新 || echo 已在位)" "$TARGET_USER"
 say "访问：$URLS"
+if [[ -n "$STATE_DIR" ]]; then
+  say "状态目录：$STATE_DIR（auth.json / probes.json 都在这里，不进 git）"
+  say "以后重跑本脚本要带同样参数：--state-dir $STATE_DIR"
+fi
 
 CREDS="$(sudo journalctl -u "$UNIT_NAME" --no-pager -n 80 2>/dev/null | grep -m1 '初始账号' || true)"
 if [[ -n "$CREDS" ]]; then

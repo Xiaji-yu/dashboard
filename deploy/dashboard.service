@@ -44,6 +44,11 @@ Environment=DASHBOARD_INTERVAL=1.0
 # Environment=DASHBOARD_PASSWORD=换成你自己的强密码
 # 凭据文件默认是项目目录下的 auth.json（600 权限，需对服务用户可写）：
 # Environment=DASHBOARD_AUTH_FILE=/home/xiaji/code/dashboard/auth.json
+#
+# 生产副本（git clone）建议把凭据与探测目标放到仓库外，git 工作区才能一直保持干净
+# （update.sh 要求工作区干净）。install.sh --state-dir DIR 会自动写下面两行：
+# Environment=DASHBOARD_AUTH_FILE=/home/xiaji/apps/dashboard-state/auth.json
+# Environment=DASHBOARD_PROBES=/home/xiaji/apps/dashboard-state/probes.json
 
 # 需要固定网卡/磁盘时再打开：
 # Environment=DASHBOARD_NIC=enx000ec6c87fb8

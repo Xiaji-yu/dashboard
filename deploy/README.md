@@ -55,6 +55,41 @@ cd /home/xiaji/code/dashboard
 
 下面是**不用脚本时**的手动步骤，也可以用来对照脚本改了什么。
 
+### 0.1 生产与开发分离（可选，长期运行推荐）
+
+开发目录（`~/code/dashboard`）会经常改文件，不适合直接跑生产：工作区一脏，`update.sh`
+就会拒绝更新，而且你分不清「线上的版本」和「正在改的版本」。长期运行建议拆成两份：
+
+```text
+~/code/dashboard           # 开发：随便改、随便跑（换端口，别占 8282）
+~/apps/dashboard           # 生产：干净的 git clone，systemd 指向这里
+~/apps/dashboard-state/    # 状态：auth.json、probes.json（不进 git）
+```
+
+```bash
+# 1. 生产副本（HTTPS 克隆，更新走 gh 凭据）
+git clone https://github.com/Xiaji-yu/dashboard.git ~/apps/dashboard
+
+# 2. 状态目录：从旧目录迁移凭据与探测目标（目标已存在则不会覆盖）
+mkdir -p ~/apps/dashboard-state && chmod 700 ~/apps/dashboard-state
+install -m 600 ~/code/dashboard/auth.json   ~/apps/dashboard-state/auth.json
+install -m 600 ~/code/dashboard/probes.json ~/apps/dashboard-state/probes.json
+
+# 3. 装/切到生产副本（unit 的 WorkingDirectory 与 ExecStart 都会指向 ~/apps/dashboard）
+cd ~/apps/dashboard
+./deploy/install.sh --state-dir ~/apps/dashboard-state
+```
+
+要点：
+
+- `--state-dir` 会让 unit 带上 `DASHBOARD_AUTH_FILE` / `DASHBOARD_PROBES`，两个文件都放仓库外；
+  `probes.json` 在仓库里是被跟踪的，放到这里改才不会把工作区弄脏。重跑 `install.sh` 时要带同样参数
+  （脚本会把当前值打印出来）。
+- 迁移后旧登录态仍有效（`auth.json` 里就是账号与会话），不需要重新登录；旧目录里的 `auth.json`
+  保留作备份，确认没问题后再删。
+- 开发目录不要再监听 8282（会和 systemd 抢端口）：`DASHBOARD_PORT=8283 ./run.sh start`。
+- 之后更新生产：`cd ~/apps/dashboard && ./deploy/update.sh`（状态目录不会被 `git pull` 碰到）。
+
 ### 1. 停掉 run.sh 起的实例（避免和 systemd 抢 8282）
 
 ```bash

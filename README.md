@@ -140,6 +140,15 @@ docker 与 systemd 的状态；容器化要把这些宿主能力全开后，隔�
 工作区有未提交改动时默认拒绝更新；健康检查失败会自动回滚到更新前的提交（更新前工作区需干净）。
 细节见 [`deploy/README.md`](deploy/README.md) 的「日志、更新、备份」。
 
+长期运行建议把生产和开发拆开（和 `agent-demo` 的做法一致）：
+
+- `~/code/dashboard` 只做开发，跑别的端口；
+- `~/apps/dashboard` 是一份干净的 git clone，systemd 指向它；
+- `~/apps/dashboard-state/` 放 `auth.json` 与 `probes.json`，不进 git，
+  用 `./deploy/install.sh --state-dir ~/apps/dashboard-state` 写进 unit。
+
+完整步骤与注意事项见 [`deploy/README.md`](deploy/README.md) 的「0.1 生产与开发分离」。
+
 手动安装（想自己改 unit 时）见 [`deploy/README.md`](deploy/README.md)，最小路径：
 
 ```bash
