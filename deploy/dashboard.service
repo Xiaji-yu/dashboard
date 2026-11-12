@@ -1,6 +1,11 @@
 # 8282 总控台 —— systemd 服务单元
 #
-# 安装（把路径与用户名改成你自己的）：
+# 推荐用脚本安装（会自动填好 User= / 路径 / 端口，并处理端口占用与依赖）：
+#   ./deploy/install.sh
+#   ./deploy/install.sh --port 9000 --base-path /dashboard --trust-proxy
+#   ./deploy/install.sh --dry-run          # 只预览将写入的内容
+#
+# 手动安装（把路径与用户名改成你自己的）：
 #   sudo cp deploy/dashboard.service /etc/systemd/system/dashboard.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now dashboard

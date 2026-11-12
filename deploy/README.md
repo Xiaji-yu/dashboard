@@ -19,7 +19,41 @@
 
 ## 方式一：systemd（推荐）
 
-仓库里已经带了 `deploy/dashboard.service`。
+仓库里已经带了 `deploy/dashboard.service` 和一键安装脚本 `deploy/install.sh`。
+
+### 0. 一键安装（推荐）
+
+> **先读脚本再运行**：`install.sh` 会用 sudo 写 `/etc/systemd/system/dashboard.service`、执行
+> `systemctl enable/restart`，加 `--rapl-udev` 还会写 `/etc/udev/rules.d`。只从官方仓库拿这份脚本，
+> 不确定时先 `--dry-run`（只打印不执行）或直接读完脚本再跑。同理，`update.sh` 会 `git pull` 并重启服务。
+
+```bash
+cd /home/xiaji/code/dashboard
+./deploy/install.sh
+```
+
+脚本会：填好 unit 里的 `User=` / `WorkingDirectory=` / `ExecStart=`；停掉 `run.sh` 起的旧实例；
+检查端口是否被占；缺 `psutil` 时在项目里建 `.venv` 装依赖（不动系统 pip）；
+写入 `/etc/systemd/system/dashboard.service` 并 `enable` + `restart`；最后打印初始账号密码。
+
+**不需要用 `sudo` 启动脚本**：只有写 unit、`systemctl`、RAPL chmod 这些步骤会自己调 `sudo`，
+服务仍以你的账号运行。整条 `sudo ./deploy/install.sh` 也可以，脚本会用 `SUDO_USER` 切回你的账号。
+
+常用参数：
+
+```bash
+./deploy/install.sh --dry-run                     # 只预览 unit 与将执行的命令
+./deploy/install.sh --port 9000                   # 换端口
+./deploy/install.sh --host 127.0.0.1             # 只监听回环（配合 SSH 隧道）
+./deploy/install.sh --base-path /dashboard --trust-proxy   # 反向代理子路径
+./deploy/install.sh --rapl-udev                   # 额外装 RAPL udev 规则
+./deploy/install.sh --user someone                # 指定服务用户（默认当前用户）
+./deploy/install.sh --uninstall                   # 卸载，保留 auth.json
+```
+
+重复运行是幂等的：unit 没变就只 `start`，变了才 `restart`，不会装出两份。
+
+下面是**不用脚本时**的手动步骤，也可以用来对照脚本改了什么。
 
 ### 1. 停掉 run.sh 起的实例（避免和 systemd 抢 8282）
 
@@ -150,12 +184,80 @@ journalctl -u dashboard -n 100      # 看最近 100 行
 更新（前端是静态文件，没有构建步骤，重启即生效）：
 
 ```bash
+./deploy/update.sh                  # 拉代码 → 按需补依赖 → 重启 → 健康检查
+./deploy/update.sh --dry-run        # 只看会更新哪些提交
+```
+
+`update.sh` 的约定：
+
+- 工作区有未提交改动时**默认拒绝更新**（`--force` 可跳过），避免把线上改动覆盖掉；
+- 只做 `git pull --ff-only`：本地有未推送提交或需要合并时直接报错，不替你做合并；
+- 依赖只在 `requirements.txt` 变化或缺 `psutil` 时才补，数据文件（`auth.json` / `probes.json`）不动；
+- 重启后请求 `/api/auth` 做健康检查，失败时在「更新前工作区干净」的前提下自动回滚到更新前的提交；
+- git 始终以服务用户执行（脚本被 `sudo` 跑时切回去），不会把仓库文件变成 root 所有。
+
+手动更新（脚本不可用时）：
+
+```bash
 cd /home/xiaji/code/dashboard && git pull
 sudo systemctl restart dashboard
 ```
 
 需要备份的只有两个文件：`auth.json`（账号与会话）与 `probes.json`（服务页探测目标）。
 曲线历史只在内存里，不用备份。
+
+### 7.1 让服务用户免 sudo 管理本服务（可选）
+
+`User=` 只决定**进程以谁的身份运行**，不授予任何 systemctl 权限：`systemctl` 走的是 D-Bus →
+PID 1 → polkit（Ubuntu 24.04 的默认策略是 `allow_active=auth_admin_keep`）。所以在桌面会话里
+会弹管理员认证，在 SSH / 无 polkit agent 的环境里会直接失败：
+`Failed to restart dashboard.service: Interactive authentication required`。
+
+服务用户能做的只有只读操作（`status` / `show` / `is-active`）；`start/stop/restart/enable/disable`
+都要提权。想免 sudo，二选一：
+
+**A. sudoers 白名单（推荐，影响面最小）**
+
+```bash
+sudo visudo -f /etc/sudoers.d/dashboard
+```
+
+```text
+xiaji ALL=(root) NOPASSWD: /usr/bin/systemctl start dashboard, \
+                           /usr/bin/systemctl stop dashboard, \
+                           /usr/bin/systemctl restart dashboard
+```
+
+- 只列这一个 unit 的这三个动作，**不要**写成 `/usr/bin/systemctl`（那等于给 root）；
+- sudo 是按命令行**字面**匹配的：脚本里用的是 `systemctl restart dashboard`（不带 `.service`），
+  手动敲 `dashboard.service` 属于另一条命令，需要的话再加一行；`enable` / `daemon-reload` /
+  写 unit 仍会要密码（只有重启能免密）；
+- `status` 本身不需要 sudo，`journalctl` 要读日志则把用户加进 `systemd-journal`（Debian/Ubuntu 也可加 `adm`）；
+- 有了这条，`deploy/update.sh` 里重启那一步的 `sudo systemctl restart dashboard` 会直接命中白名单，
+  不再提示密码。
+
+**B. polkit 规则（按 unit 精确放行，不需要 sudo 配置）**
+
+```bash
+sudo tee /etc/polkit-1/rules.d/50-dashboard.rules >/dev/null <<'EOF'
+polkit.addRule(function (action, subject) {
+  if (action.id === "org.freedesktop.systemd1.manage-units" &&
+      subject.user === "xiaji" &&
+      action.lookup("unit") === "dashboard.service" &&
+      ["start", "stop", "restart", "try-restart", "reload"].indexOf(action.lookup("verb")) >= 0) {
+    return polkit.Result.YES;
+  }
+});
+EOF
+```
+
+- polkitd 会自动加载 `rules.d` 的改动，不用重启；
+- `enable/disable` 是另一个 action（`manage-unit-files`），需要的话再单独写一条；
+- 规则是 JS，写错会静默不生效：用 `pkcheck --action-id org.freedesktop.systemd1.manage-units …` 验证。
+
+**不推荐：改成用户级 unit（`systemctl --user`）**。确实能彻底免 sudo，但会丢掉这个项目的几个
+关键能力：RAPL 功耗要 root 才能 chmod（得另配 udev/root oneshot）；`AmbientCapabilities=CAP_NET_RAW`
+用户管理器给不了，设备页的局域网扫描会退化；`ProtectSystem` 之类的加固也基本用不上。
 
 ### 8. 到底要不要用 root？（不建议）
 
@@ -180,6 +282,11 @@ sudo systemctl restart dashboard
 
 | 现象 | 原因与处理 |
 | --- | --- |
+| `install.sh` 说端口被占用 | 先用 `ss -tlnp \| grep 8282` 看是谁；换端口 `--port`，确认可以覆盖再用 `--force` |
+| `install.sh` 提示没有 systemd | 容器或 WSL1 里没有 PID 1 的 systemd：改用 `./run.sh start` 或 `deploy/docker-compose.yml` |
+| `install.sh` 提示创建 venv 失败 | 缺 `python3-venv`：`sudo apt install python3-venv`（或先手动 `pip install psutil`） |
+| `install.sh` 提示服务用户没有写权限 | `auth.json` 要写在项目目录：把仓库放到该用户可写的路径，或 `chown` 给服务用户 |
+| `systemctl restart` 提示 `Interactive authentication required` | 无桌面 polkit agent 时的正常现象：用 `sudo`，或按 7.1 配 sudoers / polkit 白名单 |
 | 服务启动失败/被跳过，日志里有「拒绝以 root 运行」 | `User=` 被删掉或留空了，补上 `User=你的账号` 即可 |
 | 反代后所有人都登不进来（429） | 忘了设 `DASHBOARD_TRUST_PROXY=1`，限速把所有人算成了代理一个 IP |
 | 凭据损坏后服务起不来 | 这是有意为之（避免静默覆盖丢账号）；看提示里的 `auth.json.corrupt-*` 备份，确认要重置就移走 `auth.json` 再启动 |
