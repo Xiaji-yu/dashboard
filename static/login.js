@@ -63,12 +63,46 @@
     if (host) document.getElementById('login-host').textContent = host;
   }
 
+  var AUTH_URL = BASE + '/api/auth';
+
+  function enterDashboard() {
+    window.location.replace(BASE + '/');
+  }
+
+  function resetSubmit() {
+    submit.disabled = false;
+    submit.textContent = '进入总控台';
+  }
+
+  /* 会话是否已经建立。
+     不能只看登录请求的返回值：请求可能已经到达服务端、Cookie 也已经下发，
+     但响应在浏览器侧被拦截/中断（Vivaldi 的内置拦截器、扩展、代理抖动都出现过），
+     那样 fetch 会 reject，而实际已经登录成功。 */
+  function checkSignedIn() {
+    return fetch(AUTH_URL, { cache: 'no-store' })
+      .then(function (res) { return res.json(); })
+      .then(function (data) { return Boolean(data && data.authenticated); })
+      .catch(function () { return false; });
+  }
+
+  /* 登录请求没拿到可用的响应：先复查会话，真的没登上才报错 */
+  function recover(message) {
+    return checkSignedIn().then(function (signedIn) {
+      if (signedIn) {
+        enterDashboard();
+        return;
+      }
+      showError(message || '无法连接服务，请确认看板还在运行');
+      resetSubmit();
+    });
+  }
+
   /* 已经登录过就直接进看板；顺便把主机名显示出来 */
-  fetch(BASE + '/api/auth', { cache: 'no-store' })
+  fetch(AUTH_URL, { cache: 'no-store' })
     .then(function (res) { return res.json(); })
     .then(function (data) {
       showHost(data.host);
-      if (data.authenticated) window.location.replace(BASE + '/');
+      if (data.authenticated) enterDashboard();
     })
     .catch(function () { /* 服务没起来时保持登录页 */ });
 
@@ -83,24 +117,30 @@
       cache: 'no-store',
       body: JSON.stringify({ username: userInput.value, password: passInput.value })
     }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) {
+      return res.json().catch(function () { return null; }).then(function (data) {
         return { status: res.status, data: data };
       });
     }).then(function (result) {
-      if (result.status === 200 && result.data.ok) {
-        window.location.replace(BASE + '/');
+      var data = result.data;
+      if (data && data.ok) {
+        enterDashboard();
         return;
       }
-      showError(result.data.message || '登录失败，请重试');
-      shakeFields();
-      passInput.value = '';
-      passInput.focus();
-      submit.disabled = false;
-      submit.textContent = '进入总控台';
+      if (data && data.message) {
+        showError(data.message);
+        shakeFields();
+        passInput.value = '';
+        passInput.focus();
+        resetSubmit();
+        return;
+      }
+      /* 状态码拿到了但响应体读不出来：可能是代理返回了错误页，复查一次会话 */
+      return recover(result.status >= 500
+        ? '服务暂时不可用，请稍后重试'
+        : '登录失败，请重试');
     }).catch(function () {
-      showError('无法连接服务，请确认看板还在运行');
-      submit.disabled = false;
-      submit.textContent = '进入总控台';
+      /* 连状态码都没拿到（响应被拦截或连接中断）：同样以会话状态为准 */
+      return recover();
     });
   });
 
