@@ -11,32 +11,106 @@
 <link rel="stylesheet" href="__DASH_BASE__/static/style.css">
 </head>
 <body class="login-body">
-<main class="login-wrap">
-  <form class="login-card" id="login-form" method="post" action="__DASH_BASE__/api/login">
-    <div class="login-brand">
-      <span class="dot" id="login-dot"></span>
-      <span id="login-host">总控台</span>
+<!-- 登录页版式对齐 xiaji-home 内容后台：点阵纸底 + 裁切标记 + 边线延伸 -->
+<main class="adm-login">
+  <div class="adm-login__tag mono">● DASHBOARD</div>
+  <div class="adm-login__tag adm-login__tag--r mono">PRIVATE AREA · 内部</div>
+  <span class="adm-login__foot mono">总控台 · DASHBOARD</span>
+  <span class="adm-login__foot adm-login__foot--r mono">● SECURED · 密码认证</span>
+
+  <!-- 四角十字准星 + 屏幕两侧刻度尺（排版打样的对位标记语言） -->
+  <i class="adm-login__mark adm-login__mark--tl" aria-hidden="true"></i>
+  <i class="adm-login__mark adm-login__mark--tr" aria-hidden="true"></i>
+  <i class="adm-login__mark adm-login__mark--bl" aria-hidden="true"></i>
+  <i class="adm-login__mark adm-login__mark--br" aria-hidden="true"></i>
+  <i class="adm-login__ticks adm-login__ticks--l" aria-hidden="true"></i>
+  <i class="adm-login__ticks adm-login__ticks--r" aria-hidden="true"></i>
+
+  <!-- 面板：卡片边框向上下左右延伸至屏幕边缘（线条主题） -->
+  <section class="adm-login__panel">
+    <i class="adm-login__vrules adm-login__vrules--l" aria-hidden="true"></i>
+    <i class="adm-login__vrules adm-login__vrules--r" aria-hidden="true"></i>
+
+    <i class="adm-login__rule adm-login__rule--t" aria-hidden="true"></i>
+    <i class="adm-login__rule adm-login__rule--b" aria-hidden="true"></i>
+    <i class="adm-login__rule adm-login__rule--l" aria-hidden="true"></i>
+    <i class="adm-login__rule adm-login__rule--r" aria-hidden="true"></i>
+
+    <div class="adm-login__card">
+      <form class="adm-login__form" id="login-form" novalidate>
+        <header class="adm-login__bar mono">
+          <span>DASHBOARD ADMIN</span>
+          <span>总控台登录</span>
+        </header>
+
+        <div class="adm-login__no mono">
+          <span>01 · AUTH</span>
+          <span>密码认证</span>
+        </div>
+
+        <h1 class="adm-login__welcome">欢迎回来</h1>
+        <p class="adm-login__sub">
+          输入账号和密码，进入总控台。首次登录用启动日志里的初始密码。
+        </p>
+
+        <div class="adm-login__labelrow">
+          <label class="adm-login__label mono" for="login-user">账号</label>
+          <span class="adm-login__labelen mono">USERNAME</span>
+        </div>
+        <div class="adm-login__field" id="login-user-field">
+          <input id="login-user" class="adm-login__input" name="username" type="text"
+                 autocomplete="username" autocapitalize="off" autocorrect="off"
+                 spellcheck="false" placeholder="输入账号" required>
+          <i class="adm-login__caret" aria-hidden="true"></i>
+        </div>
+
+        <div class="adm-login__labelrow">
+          <label class="adm-login__label mono" for="login-pass">密码</label>
+          <span class="adm-login__labelen mono">PASSWORD</span>
+        </div>
+        <div class="adm-login__field" id="login-pass-field">
+          <input id="login-pass" class="adm-login__input" name="password" type="password"
+                 autocomplete="current-password" placeholder="输入密码" required>
+          <button type="button" class="adm-login__show mono" id="login-show"
+                  aria-label="显示或隐藏密码">显示</button>
+          <i class="adm-login__caret" aria-hidden="true"></i>
+        </div>
+        <p class="adm-login__caps mono" id="login-caps" role="status" hidden>
+          ⚠ CAPS LOCK · 大写锁定已开启
+        </p>
+
+        <button class="adm-login__submit" type="submit" id="login-submit">进入总控台</button>
+
+        <p class="adm-login__hint mono">
+          登录后可在侧栏「账号」里修改密码；改完其他设备的登录会立即失效。
+        </p>
+
+        <!-- 会话信息面板：左主机 · 右凭据 —— 面板顶线横贯全屏 -->
+        <div class="adm-login__session">
+          <div class="adm-login__sesscol">
+            <span class="adm-login__sesskey mono">HOST · 主机</span>
+            <span class="adm-login__sessval mono" id="login-host">总控台</span>
+            <span class="adm-login__sesskey mono">SESSION · 会话有效期</span>
+            <span class="adm-login__sessval mono">7 天</span>
+          </div>
+          <div class="adm-login__sesscol">
+            <span class="adm-login__sesskey mono">AUTH · 认证方式</span>
+            <span class="adm-login__sessval mono">账号 + 密码</span>
+            <span class="adm-login__sesskey mono">凭据存储</span>
+            <span class="adm-login__sessval mono">PBKDF2-SHA256</span>
+          </div>
+        </div>
+
+        <div class="adm-login__row mono">
+          <a href="__DASH_BASE__/">← 返回看板</a>
+          <span>仅限管理员使用</span>
+        </div>
+      </form>
     </div>
-    <div class="login-title">登录</div>
+  </section>
 
-    <label class="login-field">
-      <span>账号</span>
-      <input id="login-user" name="username" type="text" autocomplete="username"
-             autocapitalize="off" autocorrect="off" spellcheck="false" required>
-    </label>
-
-    <label class="login-field">
-      <span>密码</span>
-      <input id="login-pass" name="password" type="password"
-             autocomplete="current-password" required>
-    </label>
-
-    <div class="login-error" id="login-error" role="alert"></div>
-    <button class="login-button" type="submit" id="login-submit">登录</button>
-    <p class="login-tip">
-      首次登录用启动日志里的初始密码；登录后可在侧栏「账号」里修改密码。
-    </p>
-  </form>
+  <!-- 错误提示：底部居中 toast（login.js 切换 .show） -->
+  <div class="adm-toast adm-toast--err" id="login-error" role="alert"></div>
 </main>
 <script src="__DASH_BASE__/static/login.js"></script>
 </body>

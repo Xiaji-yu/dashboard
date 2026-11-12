@@ -1513,53 +1513,7 @@ body {
   .usb-row, .bt-row, .iface-row, .pci-row { font-size: 11.5px; padding: 3px 0; }
 }
 
-/* ---------------- 登录页与账号弹窗 ---------------- */
-
-.login-body {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 100vh;
-  padding: 20px;
-}
-
-.login-wrap { width: 100%; max-width: 348px; }
-
-.login-card {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 28px 24px 22px;
-  background: var(--white);
-  border: 1px solid var(--line);
-  border-radius: 0;
-}
-
-.login-brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.login-brand .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--ink);
-}
-
-.login-title {
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  line-height: 1.05;
-  color: var(--ink);
-}
+/* ---------------- 账号弹窗复用的表单小样式 ---------------- */
 
 .login-field {
   display: flex;
@@ -1576,36 +1530,6 @@ body {
   text-transform: uppercase;
 }
 
-.login-field input {
-  padding: 9px 12px;
-  font-size: 13px;
-  color: var(--ink);
-  background: transparent;
-  border: 1px solid var(--line-soft);
-  border-radius: 0;
-  outline: none;
-  transition: border-color 0.25s var(--ease), background 0.25s var(--ease);
-}
-
-.login-field input:focus { border-color: var(--ink); background: var(--paper); }
-
-.login-button {
-  margin-top: 6px;
-  padding: 11px 20px;
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  color: var(--paper);
-  background: var(--ink);
-  border: 1px solid var(--ink);
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  transition: background 0.3s var(--ease), color 0.3s var(--ease);
-}
-
-.login-button:hover { background: transparent; color: var(--ink); }
-.login-button:disabled { opacity: 0.45; cursor: default; }
-
 .login-error { font-size: 12px; color: var(--danger); }
 .login-error.show { min-height: 16px; }
 
@@ -1614,6 +1538,839 @@ body {
   font-size: 11.5px;
   color: var(--dim);
   line-height: 1.6;
+}
+
+/* ---------------- 登录页：对齐 xiaji-home 内容后台 ----------------
+   点阵纸底 + 四角十字准星 + 屏幕两侧刻度尺 + 卡片边线向四边延伸
+   （排版「裁切标记」语言）。卡片实心纸底，盖住穿过自己的线。 */
+
+.adm-login {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden; /* 延伸线是 100vw / 100vh，裁掉溢出免得出现滚动条 */
+  padding: 24px;
+  background-color: var(--paper);
+  /* 点阵纹理：等大墨点 */
+  background-image: radial-gradient(circle, rgba(17, 17, 17, 0.075) 1px, transparent 1.1px);
+  background-size: 17px 17px;
+  color: var(--ink);
+  font-family: var(--sans);
+}
+
+.adm-login__tag {
+  position: absolute;
+  top: 26px;
+  left: clamp(24px, 5vw, 72px);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--ink-soft);
+}
+.adm-login__tag--r {
+  left: auto;
+  right: clamp(24px, 5vw, 72px);
+  color: var(--muted);
+}
+
+.adm-login__foot {
+  position: absolute;
+  left: clamp(24px, 5vw, 72px);
+  bottom: 26px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.adm-login__foot--r {
+  left: auto;
+  right: clamp(24px, 5vw, 72px);
+  text-align: right;
+}
+
+/* ---- 四角十字准星 ---- */
+.adm-login__mark {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+}
+.adm-login__mark::before,
+.adm-login__mark::after {
+  content: '';
+  position: absolute;
+  background: var(--ink-soft);
+}
+.adm-login__mark::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+}
+.adm-login__mark::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+}
+.adm-login__mark--tl { top: 14px; left: 14px; }
+.adm-login__mark--tr { top: 14px; right: 14px; }
+.adm-login__mark--bl { bottom: 14px; left: 14px; }
+.adm-login__mark--br { bottom: 14px; right: 14px; }
+
+/* ---- 屏幕两侧的刻度尺（像仪器面板） ---- */
+.adm-login__ticks {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 9px;
+  height: 34vh;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--line-soft) 0 1px,
+    transparent 1px 11px
+  );
+}
+.adm-login__ticks--l { left: 22px; }
+.adm-login__ticks--r { right: 22px; }
+
+/* ---- 面板与四条延伸线 ---- */
+.adm-login__panel {
+  position: relative;
+  width: min(460px, 100%);
+}
+
+/* 卡片两侧的纵向标注线：贴着卡片边框各两条（一实一点），上下贯穿全屏 */
+.adm-login__vrules {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 56px;
+  pointer-events: none;
+}
+.adm-login__vrules--l { right: 100%; }
+.adm-login__vrules--r { left: 100%; }
+.adm-login__vrules::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  /* 两端渐隐：线「长」进屏幕边缘，不在边缘处生硬截断 */
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--line-soft) 40px,
+    var(--line-soft) calc(100% - 40px),
+    transparent
+  );
+}
+.adm-login__vrules::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  opacity: 0.55;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--line-soft) 0 5px,
+    transparent 5px 12px
+  );
+}
+.adm-login__vrules--l::before { right: 22px; }
+.adm-login__vrules--l::after { right: 46px; }
+.adm-login__vrules--r::before { left: 22px; }
+.adm-login__vrules--r::after { left: 46px; }
+
+.adm-login__rule {
+  position: absolute;
+  background: var(--line);
+  z-index: 0;
+}
+/* 延伸线的远端各落一枚小方点节点（8 个，像图纸的定位标记） */
+.adm-login__rule::before,
+.adm-login__rule::after {
+  content: '';
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  background: var(--ink);
+}
+.adm-login__rule--t::before {
+  left: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.adm-login__rule--t::after {
+  right: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.adm-login__rule--b::before {
+  left: 30px;
+  bottom: 50%;
+  transform: translateY(50%);
+}
+.adm-login__rule--b::after {
+  right: 30px;
+  bottom: 50%;
+  transform: translateY(50%);
+}
+.adm-login__rule--l::before {
+  top: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.adm-login__rule--l::after {
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.adm-login__rule--r::before {
+  top: 30px;
+  right: 50%;
+  transform: translateX(50%);
+}
+.adm-login__rule--r::after {
+  bottom: 30px;
+  right: 50%;
+  transform: translateX(50%);
+}
+.adm-login__rule--t {
+  left: 50%;
+  top: 0;
+  width: 100vw;
+  height: 1.5px;
+  transform: translate(-50%, -50%);
+}
+.adm-login__rule--b {
+  left: 50%;
+  bottom: 0;
+  width: 100vw;
+  height: 1.5px;
+  transform: translate(-50%, 50%);
+}
+.adm-login__rule--l {
+  top: 50%;
+  left: 0;
+  width: 1.5px;
+  height: 100vh;
+  transform: translate(-50%, -50%);
+}
+.adm-login__rule--r {
+  top: 50%;
+  right: 0;
+  width: 1.5px;
+  height: 100vh;
+  transform: translate(50%, -50%);
+}
+
+/* ---- 开场编排：线沿自己的方向推进进场 ------------------------------
+   横线横向平移（从左/右屏幕外推入），竖线纵向平移（从上/下推入），
+   像一排尺子被依次推到位。主线四条先就位，卡片内结构线跟着
+   各自的内容推进，标注线最后滑入。开局画面上只有卡片淡入。 */
+
+@keyframes adm-in-h-from-left {
+  from { transform: translate(calc(-50% - 100vw), 0); }
+  to { transform: translate(-50%, 0); }
+}
+@keyframes adm-in-h-from-right {
+  from { transform: translate(calc(-50% + 100vw), 0); }
+  to { transform: translate(-50%, 0); }
+}
+@keyframes adm-in-t-from-left {
+  from { transform: translate(calc(-50% - 100vw), -50%); }
+  to { transform: translate(-50%, -50%); }
+}
+@keyframes adm-in-b-from-right {
+  from { transform: translate(calc(-50% + 100vw), 50%); }
+  to { transform: translate(-50%, 50%); }
+}
+@keyframes adm-in-l-from-top {
+  from { transform: translate(-50%, calc(-50% - 100vh)); }
+  to { transform: translate(-50%, -50%); }
+}
+@keyframes adm-in-r-from-bottom {
+  from { transform: translate(50%, calc(-50% + 100vh)); }
+  to { transform: translate(50%, -50%); }
+}
+@keyframes adm-in-v-from-top {
+  from { transform: translateY(-100vh); }
+  to { transform: translateY(0); }
+}
+@keyframes adm-in-v-from-bottom {
+  from { transform: translateY(100vh); }
+  to { transform: translateY(0); }
+}
+@keyframes adm-card-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes adm-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.adm-login__rule--t { animation: adm-in-t-from-left 0.75s var(--ease) 0.3s both; }
+.adm-login__rule--l { animation: adm-in-l-from-top 0.75s var(--ease) 0.5s both; }
+.adm-login__rule--r { animation: adm-in-r-from-bottom 0.75s var(--ease) 0.65s both; }
+.adm-login__rule--b { animation: adm-in-b-from-right 0.75s var(--ease) 0.8s both; }
+.adm-login__bar::after { animation: adm-in-h-from-right 0.7s var(--ease) 0.95s both; }
+.adm-login__no::after { animation: adm-in-h-from-left 0.7s var(--ease) 1.05s both; }
+.adm-login__session::before { animation: adm-in-h-from-left 0.7s var(--ease) 1.25s both; }
+.adm-login__row::before { animation: adm-in-h-from-right 0.7s var(--ease) 1.35s both; }
+.adm-login__vrules--l { animation: adm-in-v-from-top 0.9s var(--ease) 0.9s both; }
+.adm-login__vrules--r { animation: adm-in-v-from-bottom 0.9s var(--ease) 1.05s both; }
+
+.adm-login__card { animation: adm-card-in 0.6s var(--ease) 0.12s both; }
+.adm-login__tag,
+.adm-login__foot { animation: adm-fade 0.6s var(--ease) 1.5s both; }
+.adm-login__ticks { animation: adm-fade 0.6s var(--ease) 1.3s both; }
+.adm-login__mark { animation: adm-fade 0.6s var(--ease) 1.4s both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .adm-login,
+  .adm-login * {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+  }
+}
+
+/* ---- 卡片（实心纸底，盖住穿过自己的线） ---- */
+.adm-login__card {
+  position: relative;
+  z-index: 1;
+  background: var(--paper);
+  border: 1.5px solid var(--line);
+  box-shadow: 8px 8px 0 rgba(17, 17, 17, 0.08);
+}
+
+.adm-login__bar,
+.adm-login__no,
+.adm-login__row {
+  position: relative;
+}
+/* 卡片内的结构分隔线延伸贯穿全屏：伪元素以分隔线为中心横贯 100vw，
+   卡片内的部分与 border 重合（同色同宽看不出），卡片外露出「从边距长进来」 */
+.adm-login__bar::after,
+.adm-login__no::after,
+.adm-login__row::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  width: 100vw;
+  height: 1px;
+  background: var(--line-soft);
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: -1;
+}
+.adm-login__bar::after { bottom: -1px; }
+.adm-login__no::after { bottom: -1px; }
+.adm-login__row::before { top: -1px; }
+
+.adm-login__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 22px;
+  border-bottom: 1px solid var(--line);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  color: var(--ink-soft);
+}
+.adm-login__bar span:last-child { color: var(--muted); }
+
+.adm-login__form {
+  display: flex;
+  flex-direction: column;
+  padding: 34px 32px 28px;
+}
+
+/* 章节编号行：01 / 02 的板式语言 */
+.adm-login__no {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line-soft);
+  padding-bottom: 12px;
+  margin-bottom: 30px;
+}
+
+.adm-login__welcome {
+  margin: 0 0 8px;
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.adm-login__sub {
+  margin: 0 0 36px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.adm-login__labelrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  /* 和输入条同一档内边距：标签、正文、右侧按钮站在同一条竖向基准线上 */
+  padding: 0 10px 0 14px;
+  margin-top: 22px;
+}
+.adm-login__labelrow:first-of-type { margin-top: 0; }
+
+.adm-login__label {
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+
+.adm-login__labelen {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+/* 输入条：只留底部一条 1px 细线，像印刷表单上的填写栏。
+   聚焦时不套方框、不加粗线条 —— 而是「把这一格填进纸面」：
+   极轻的纸色底 + 底线转墨 + 左侧定位块长出来 + 刻度尺淡出。 */
+.adm-login__field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  transition:
+    border-bottom-color 0.2s var(--ease),
+    background-color 0.2s var(--ease);
+}
+/* 填写刻度尺：输入条下方一排细刻度（图纸的填写栏语言） */
+.adm-login__field::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+  height: 5px;
+  background: repeating-linear-gradient(
+    to right,
+    var(--line-soft) 0 1px,
+    transparent 1px 13px
+  );
+  opacity: 0.55;
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease);
+}
+/* 左侧定位块：聚焦时从中间长出来，标出「正在填这一格」 */
+.adm-login__field::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  background: var(--ink);
+  transform: translateY(-50%);
+  transition: height 0.22s var(--ease);
+  pointer-events: none;
+}
+.adm-login__field:focus-within {
+  border-bottom-color: var(--ink);
+  background: var(--paper-2);
+}
+.adm-login__field:focus-within::before {
+  opacity: 0; /* 有底色了，刻度尺再留着就成了双线 */
+}
+.adm-login__field:focus-within::after {
+  height: 20px;
+}
+/* 焦点完全由上面这套样式表达，任何 UA / 扩展画的方框都压掉 */
+.adm-login__field,
+.adm-login__field:focus-within,
+.adm-login__input,
+.adm-login__input:focus,
+.adm-login__input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+/* 墨色焦点线只在「登录失败」时用：出错才值得多一条线 */
+.adm-login__caret {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1.5px;
+  height: 2px;
+  background: var(--ink);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.35s var(--ease);
+  pointer-events: none;
+}
+/* 登录失败：底线变红 + 整条抖动 */
+.adm-login__field.is-error {
+  border-bottom-color: var(--danger);
+  animation: adm-shake 0.4s var(--ease);
+}
+.adm-login__field.is-error::after {
+  background: var(--danger);
+}
+.adm-login__field.is-error .adm-login__caret {
+  background: var(--danger);
+  transform: scaleX(1);
+}
+
+@keyframes adm-shake {
+  20% { transform: translateX(-7px); }
+  40% { transform: translateX(7px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+
+.adm-login__caps {
+  margin: 10px 0 0;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--danger);
+}
+
+.adm-login__input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 15px;
+  /* 上下留够呼吸，但左右交给输入条自己的内边距 —— 聚焦时底色块才不会撑出边缘 */
+  padding: 15px 0 14px;
+  color: var(--ink);
+  caret-color: var(--ink); /* 光标跟墨色一致 */
+  outline: none;
+  box-shadow: none;
+  appearance: none;
+}
+.adm-login__input::placeholder {
+  color: var(--muted);
+  opacity: 0.55;
+  transition: opacity 0.2s var(--ease);
+}
+/* 聚焦时占位文案再退一步，让位给真正输入的内容 */
+.adm-login__field:focus-within .adm-login__input::placeholder {
+  opacity: 0.38;
+}
+/* 浏览器自动填充会把输入框涂成淡黄 / 淡蓝，和黑白纸面完全不搭：
+   用等大面积的内阴影盖住它，文字与光标仍保持墨色 */
+.adm-login__input:-webkit-autofill,
+.adm-login__input:-webkit-autofill:hover,
+.adm-login__input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--ink);
+  -webkit-box-shadow: 0 0 0 1000px var(--paper-2) inset;
+  caret-color: var(--ink);
+  transition: background-color 99999s ease-out 0s;
+}
+
+.adm-login__show {
+  border: 0;
+  background: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px 0 6px 12px;
+  outline: none;
+  transition: color 0.15s var(--ease);
+}
+.adm-login__show:hover { color: var(--ink); }
+/* 键盘走到这里时用下划线提示，而不是再画一个方框 */
+.adm-login__show:focus-visible {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  outline: none;
+}
+
+.adm-login__submit {
+  margin-top: 36px;
+  border: 1px solid var(--line);
+  background: var(--ink);
+  color: var(--paper);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em; /* 视觉居中补偿字距 */
+  padding: 14px 0;
+  cursor: pointer;
+  transition:
+    opacity 0.15s var(--ease),
+    background 0.15s var(--ease);
+}
+.adm-login__submit:hover:not(:disabled) {
+  background: var(--ink-soft);
+}
+.adm-login__submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.adm-login__hint {
+  margin: 14px 2px 0;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* ---- 会话信息面板：左主机 · 右凭据 ------------------------
+   面板顶线横贯 100vw（上下长进屏幕边缘）。 */
+.adm-login__session {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: 26px;
+  border-top: 1px solid var(--line-soft);
+  margin-top: 30px;
+  padding-top: 16px;
+}
+.adm-login__session::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  width: 100vw;
+  height: 1px;
+  background: var(--line-soft);
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.adm-login__sesscol {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+
+.adm-login__sesskey {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+.adm-login__sessval {
+  font-size: 12.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adm-login__row {
+  margin-top: 34px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.adm-login__row a {
+  color: var(--ink-soft);
+  text-decoration: none;
+}
+.adm-login__row a:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+/* ---- 错误 toast：底部居中 ---- */
+.adm-toast {
+  display: none;
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  max-width: min(420px, calc(100vw - 32px));
+  border: 1.5px solid var(--line);
+  background: var(--white);
+  padding: 10px 20px;
+  font-size: 13px;
+  box-shadow: 4px 4px 0 rgba(17, 17, 17, 0.12);
+}
+.adm-toast.show {
+  display: block;
+  animation: adm-toast-in 0.25s var(--ease);
+}
+.adm-toast--err {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: #fdf6f6;
+}
+
+@keyframes adm-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---- 窄屏：面板占满宽度，延伸线保留，装饰收紧 ---- */
+@media (max-width: 1180px) {
+  .adm-login__vrules--l::after,
+  .adm-login__vrules--r::after {
+    display: none; /* 空间不够时先收掉外侧的点线 */
+  }
+}
+@media (max-width: 900px) {
+  .adm-login__vrules {
+    display: none; /* 面板贴边后标注线没有立足之地 */
+  }
+}
+@media (max-width: 560px) {
+  /* 手机上一屏本来就矮：整张卡按「能一屏放下」重排 ——
+     标题、间距、按钮逐项收一档，会话面板收起 */
+  .adm-login {
+    padding: 12px 10px;
+  }
+  .adm-login__tag--r,
+  .adm-login__mark,
+  .adm-login__ticks,
+  .adm-login__foot {
+    display: none;
+  }
+  /* 卡片窄下来：手机上不再顶满整宽，两侧留出纸面 */
+  .adm-login__panel {
+    width: min(340px, 92vw);
+  }
+  .adm-login__bar {
+    padding: 8px 12px;
+    font-size: 9.5px;
+  }
+  .adm-login__form {
+    padding: 14px 14px 12px;
+  }
+  .adm-login__no {
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    font-size: 9.5px;
+  }
+  .adm-login__welcome {
+    margin-bottom: 3px;
+    font-size: 20px;
+  }
+  .adm-login__sub {
+    margin-bottom: 16px;
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .adm-login__labelrow {
+    margin-top: 12px;
+  }
+  .adm-login__label {
+    font-size: 10.5px;
+  }
+  /* iOS 聚焦字号 <16px 的输入框会自动放大整页，字号保持 16px，
+     靠上下内边距把输入条压矮 */
+  .adm-login__input {
+    padding: 9px 0 8px;
+    font-size: 16px;
+  }
+  .adm-login__show {
+    font-size: 10.5px;
+  }
+  .adm-login__submit {
+    margin-top: 16px;
+    padding: 10px 0;
+    font-size: 12px;
+  }
+  .adm-login__hint {
+    margin-top: 10px;
+    font-size: 10px;
+  }
+  /* 手机上会话面板收起：它只是补充信息，却占掉约 120px */
+  .adm-login__session {
+    display: none;
+  }
+  .adm-login__row {
+    margin-top: 14px;
+    padding-top: 9px;
+    font-size: 10.5px;
+  }
+}
+
+/* ---- 触屏设备（平板在内）：输入字号保持 16px ------------------------------
+   iOS Safari 聚焦字号 <16px 的输入框会自动放大整页；平板宽度超过 560px
+   走不到手机档，这里按指针类型统一兜住。 */
+@media (pointer: coarse) {
+  .adm-login__input {
+    font-size: 16px;
+  }
+  /* 「显示 / 隐藏」加大一点触控热区 */
+  .adm-login__show {
+    padding: 10px 0 10px 12px;
+  }
+}
+
+/* ---- 平板横屏 / 矮窗口：整卡按「一屏放下」收紧 ----------------------------
+   宽度仍够放桌面版布局（标签 + 英文小字 + 双列会话面板都保留），
+   只把纵向节奏逐项收一档：卡片 795px → 约 620px，768 高也不出滚动条。 */
+@media (min-width: 561px) and (max-height: 860px) {
+  .adm-login {
+    padding: 16px;
+  }
+  .adm-login__form {
+    padding: 22px 26px 18px;
+  }
+  .adm-login__bar {
+    padding: 10px 18px;
+  }
+  .adm-login__no {
+    margin-bottom: 14px;
+    padding-bottom: 8px;
+  }
+  .adm-login__welcome {
+    margin-bottom: 4px;
+    font-size: 24px;
+  }
+  .adm-login__sub {
+    margin-bottom: 18px;
+  }
+  .adm-login__labelrow {
+    margin-top: 12px;
+  }
+  .adm-login__label {
+    margin-bottom: 4px;
+  }
+  .adm-login__input {
+    padding: 10px 0 9px;
+  }
+  .adm-login__submit {
+    margin-top: 18px;
+    padding: 11px 0;
+  }
+  .adm-login__hint {
+    margin-top: 8px;
+  }
+  .adm-login__session {
+    margin-top: 16px;
+    padding-top: 10px;
+    gap: 20px;
+  }
+  .adm-login__sesscol {
+    gap: 5px;
+  }
+  .adm-login__row {
+    margin-top: 16px;
+    padding-top: 10px;
+  }
 }
 
 /* 账号弹窗 */
@@ -1744,10 +2501,12 @@ body {
     color: var(--ink-soft);
   }
 
-  .login-button:hover {
+  .adm-login__submit:hover {
     background: var(--ink);
     color: var(--paper);
   }
+
+  .adm-login__show:hover { color: var(--muted); }
 
   .nav-item:hover { background: transparent; color: var(--muted); }
   .nav-item.active:hover { background: var(--ink); color: var(--paper); }

@@ -859,7 +859,9 @@ class BasePathTest(unittest.TestCase):
         html = body.decode("utf-8")
         self.assertIn("/dashboard/static/style.css", html)
         self.assertIn("/dashboard/static/login.js", html)
-        self.assertIn('action="/dashboard/api/login"', html)
+        # 登录表单改由 login.js 以 JSON 提交（不再有原生 action），前缀仍要注入页面
+        self.assertIn('window.DASH_BASE = "/dashboard"', html)
+        self.assertIn('href="/dashboard/"', html)
         self.assertNotIn("__DASH_BASE__", html)
 
         self.assertEqual(self._raw("GET", "/dashboard/static/style.css")[0], 200)
