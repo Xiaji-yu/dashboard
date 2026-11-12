@@ -14,6 +14,36 @@ CPU、内存、磁盘、网速、温度、进程与容器状态。
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-psutil-green.svg)](requirements.txt)
 
+## ⚠️ 先读脚本，再运行
+
+**不要轻易运行任何人的 Bash / PowerShell 脚本，除非你已经核对过脚本和项目本身是否可信。**
+本项目也带脚本，它们会执行命令、安装依赖，`deploy/` 下两个还需要 sudo 改系统配置；
+换成别人 fork 或二次打包的版本，这些脚本同样可能被改过。**只从官方仓库获取，跑之前先看一眼。**
+
+| 脚本 | 会做什么 | 提权 |
+| --- | --- | --- |
+| `run.sh start` | 在项目目录里 `setsid` 启一个 `python3 server.py`，日志写 `server.log` | 不需要 |
+| `deploy/install.sh` | 建 `.venv` 装 `psutil`、`./run.sh stop`、写 `/etc/systemd/system/dashboard.service`、`systemctl enable/restart` | **需要 sudo**（写 unit、systemctl；`--rapl-udev` 还会写 `/etc/udev/rules.d`） |
+| `deploy/update.sh` | `git fetch/pull --ff-only`、按需 `pip install`、`systemctl restart`、`GET /api/auth` 健康检查 | 只有重启与失败时读日志需要 sudo |
+| `deploy/install-windows.ps1` | 用 `sc.exe` 把看板注册成 Windows 服务（`-Remove` 卸载） | 需要管理员 PowerShell |
+| `deploy/build-exe.ps1` | PyInstaller 打包 exe（只读项目文件、写产物目录） | 不需要 |
+
+核对清单（一分钟，换来的是不用担心）：
+
+1. **来源**：`git remote -v` 应是 `https://github.com/Xiaji-yu/dashboard`；从网盘/聊天群拿到的压缩包无法追溯，风险自担。
+2. **有没有被改过**：`git status` 应干净、`git diff` 为空；重点看 `run.sh`、`deploy/*.sh`、`deploy/*.ps1`
+   里有没有多出来的下载、上传、`chmod 777`、`eval`、`curl … | bash` 之类的东西。
+3. **先读再跑**：`less deploy/install.sh`；或先跑 `./deploy/install.sh --dry-run` / `./deploy/update.sh --dry-run`，
+   它们只打印将要写入的 unit 与要执行的命令，不改任何东西。
+4. **拿不准就走最小权限**：`./run.sh start` 不需要 sudo（代价只是没有开机自启）；
+   Docker 方式也不用 sudo，但 `deploy/docker-compose.yml` 要挂 `docker.sock`——那等价于 root，
+   先读 `deploy/README.md` 的对比表再决定。不需要看宿主机指标时，也不必给这个项目任何特权。
+
+本项目自身不含「从网络下载并执行」的行为：脚本里没有 `curl … | bash`、没有把远程内容 `eval` 掉，
+网络访问只有「Python 依赖从 PyPI 安装」（`requirements.txt` 里唯一的 `psutil`；`build-exe.ps1`
+另外会装 PyInstaller）和 `update.sh` 的 `git fetch/pull`。这只是方便你对照，不构成对你手上那份副本的担保——
+MIT 协议下也无担保，出了事需自行评估。
+
 ## 特性
 
 - **零依赖前端**：曲线、进度条、状态点全是手写 HTML/CSS/SVG，没有构建步骤，也不需要 npm。
@@ -86,8 +116,31 @@ $ ./run.sh log | grep auth
 ## 部署
 
 **推荐用 systemd 常驻**（这个看板的价值就是能看到宿主机：`/proc` 的进程、`/sys` 的温度风扇功耗、
-docker 与 systemd 的状态；容器化要把这些宿主能力全开后，隔离所剩不多）。完整步骤见
-[`deploy/README.md`](deploy/README.md)，最小路径：
+docker 与 systemd 的状态；容器化要把这些宿主能力全开后，隔离所剩不多）。一条命令搞定：
+
+```bash
+./deploy/install.sh                # 装成 systemd 服务，自动填好 User= / 路径 / 端口
+```
+
+- **不用 `sudo ./deploy/install.sh`**：脚本自己只对需要的步骤提权（写 unit、`daemon-reload`、
+  RAPL chmod、udev 规则），服务进程仍以你的账号运行；整条 `sudo` 跑也行，会用 `SUDO_USER` 切回去。
+- 幂等：重复运行＝更新 unit + 重启服务；不会动 `auth.json` / `probes.json`。
+- 缺 `psutil` 时在项目里建 `.venv` 装依赖，不改系统 pip；会先 `./run.sh stop`，不会和旧实例抢端口。
+- `./deploy/install.sh --dry-run` 只预览将写入的 unit 与要执行的命令；
+  `--port 9000` 换端口，`--base-path /dashboard --trust-proxy` 给反向代理，
+  `--rapl-udev` 额外装 udev 规则，`--uninstall` 卸载（保留数据）。
+
+装好之后更新：
+
+```bash
+./deploy/update.sh                  # git pull --ff-only → 补依赖 → 重启 → 健康检查
+./deploy/update.sh --dry-run        # 只看会更新哪些提交
+```
+
+工作区有未提交改动时默认拒绝更新；健康检查失败会自动回滚到更新前的提交（更新前工作区需干净）。
+细节见 [`deploy/README.md`](deploy/README.md) 的「日志、更新、备份」。
+
+手动安装（想自己改 unit 时）见 [`deploy/README.md`](deploy/README.md)，最小路径：
 
 ```bash
 cd /home/xiaji/code/dashboard
@@ -394,7 +447,7 @@ dashboard/
 ├── run.sh             # Linux/macOS 启停脚本
 ├── run.ps1            # Windows 启停脚本
 ├── tests/             # Python 用例 + chart.test.js（Node 前端图表用例）
-├── deploy/            # systemd 单元、RAPL udev 规则、Windows 打包与装机脚本
+├── deploy/            # systemd 单元、一键安装/更新脚本、RAPL udev 规则、Windows 打包与装机脚本
 ├── tools/             # gen_api_doc.py：从真实响应生成 docs/API.md
 ├── docs/
 

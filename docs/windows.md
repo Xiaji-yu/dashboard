@@ -5,6 +5,10 @@ Windows 上原样可用**；Linux 专有接口（`/proc`、`/sys`、`systemctl`�
 `platform_win.py` 里用 **PowerShell(ConvertTo-Json) + netsh + arp** 做了等价替换。
 前端零改动——同一套载荷结构。
 
+> **先读脚本再运行**：`run.ps1` 只启进程，`deploy/install-windows.ps1` 会用管理员权限调 `sc.exe`
+> 注册/删除服务。只从官方仓库获取这些脚本，运行前先看一眼（尤其是从网盘/聊天群拿到的副本）。
+> 通用核对清单见 [README](../README.md) 的「先读脚本，再运行」一节。
+
 ## ⚠️ 中文 Windows 上必须用带 BOM 的脚本（已内置修复）
 
 `run.ps1` 与 `deploy/install-windows.ps1` **必须保持 UTF-8 with BOM**。

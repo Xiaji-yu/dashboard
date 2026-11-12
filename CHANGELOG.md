@@ -7,6 +7,29 @@
 
 ### 新增
 
+- **Linux 一键部署脚本 `deploy/install.sh`**（把看板装成 systemd 服务）：
+  - 脚本本身**不用 sudo 启动**：只有写 `/etc/systemd/system`、`systemctl`、RAPL chmod、
+    udev 规则这些步骤自己提权，服务进程仍以普通用户运行；整条 `sudo` 跑时用 `SUDO_USER` 切回；
+  - 自动填 unit 的 `User=` / `WorkingDirectory=` / `ExecStart=`（复用 `deploy/dashboard.service`
+    的全部注释与加固项，不另维护一份模板），支持 `--user/--port/--host/--base-path/--trust-proxy`；
+  - 幂等：unit 未变只 `start`，变了才 `restart`；会先 `./run.sh stop` 避免与旧实例抢端口，
+    端口被占时给出 `ss` 排查提示（`--force` 可跳过）；
+  - 缺 `psutil` 时在项目里建 `.venv` 装依赖，不改系统 pip、不调用 apt；顺手校验 Python ≥ 3.9、
+    服务用户对仓库有读写权限；
+  - `--dry-run` 只预览生成的 unit 与将执行的命令，`--uninstall` 卸载（保留 `auth.json` 等数据），
+    `--rapl-udev` 额外装 RAPL 规则；README / deploy/README 同步改写为「脚本优先、手动步骤兜底」。
+- **更新脚本 `deploy/update.sh`**（服务由 systemd 托管时用其一键更新）：
+  - `git pull --ff-only` → 按需补依赖 → 重启服务 → 请求 `/api/auth` 做健康检查；
+  - **工作区有未提交改动默认拒绝更新**（`--force` 跳过），本地有未推送提交或需要合并时直接报错，
+    不做合并/强推；上游远程名从 `@{u}` 推断（`origin` 或 `upstream` 都行）；
+  - 健康检查失败且更新前工作区干净时**自动回滚**到更新前的提交并重启，回滚后仍不健康就打印日志；
+  - 依赖只在 `requirements.txt` 变化或缺 `psutil` 时补；`auth.json` / `probes.json` / `.venv` 不动；
+  - git 与 pip 始终以服务用户执行（`sudo` 跑时切回去），只对 `systemctl` 提权；
+  - `--no-restart` 只拉代码、`--no-rollback` 关掉自动回滚、`--dry-run` 只预览（含将更新的提交列表），
+    服务工作目录与当前仓库不一致时直接拦下，避免「拉了另一个 checkout」白忙。
+  - deploy/README 补充说明「`User=` 只决定进程身份、不授予 systemctl 权限」，以及免 sudo 管理的
+    sudoers 白名单 / polkit 按 unit 放行两种配置（含字面匹配、`enable` 仍要 root 等坑）。
+
 - **支持打包成 Windows exe**（`deploy/build-exe.ps1` + `runtime.py`）：目标机器无需 Python/psutil。
   - `runtime.py` 区分**只读资源**与**可写数据**：打包后 static/ 走 `sys._MEIPASS`，
     而 `auth.json`/`probes.json`/日志落在 exe 同目录（不可写时退回 `%LOCALAPPDATA%\dashboard`）——
@@ -118,6 +141,11 @@
 
 ### 修复
 
+- **登录成功却提示「无法连接服务」**（Vivaldi 新配置首次登录复现）：`POST /api/login` 已经成功、
+  Cookie 也已下发，但响应在浏览器侧被拦截或中断（内置拦截器 / 扩展 / 代理抖动），
+  `fetch` 照样 reject，旧代码把这一次请求的结果直接当成「服务连不上」，既不复查会话也不跳转，
+  只能手动刷新。现在登录失败分支会先 `GET /api/auth` 确认会话：已登录就直接进看板，
+  只有真的没登上才报错；响应体读不出来时也不再误报成「密码错误」。
 - **一次多角度提交审查发现的 20 条缺陷全部修复**（审查用 workflow 编排 10 个 agent：
   4 角度并行审查 + 独立复核 + 汇总，20 条复核结论全部复现）。重点：
   - **凭据文件损坏不再静默重建**：原来「读不到/JSON 损坏」被当成「首次启动」，
@@ -190,6 +218,12 @@
 
 ### 文档与元数据
 
+- **README 顶部新增「安全提醒：先读脚本，再运行」**：明确不要直接运行来路不明的 Bash/PowerShell
+  脚本，列出 `run.sh` / `deploy/install.sh` / `deploy/update.sh` / Windows 两个脚本各自会执行的命令
+  与提权点；并给出核对步骤（`git remote -v`、`git status`/`git diff` 看脚本是否被改过、
+  先读脚本或 `install.sh --dry-run` / `update.sh --dry-run`、拿不准就走不需要 sudo 的 `run.sh` 或 Docker，
+  并说明 Docker 挂 `docker.sock` 等价于 root）。`docs/windows.md` 与 `deploy/README.md` 的安装段也补了同样口径的提示。
+  项目自身不包含「从网络下载并执行」（`curl | bash`）这类行为——这一点也写进文档，便于对照。
 - `pyproject.toml` 补上 `[project]` 元数据：名称 `dashboard`、版本 `0.2.0`、一句话描述、
   `requires-python >= 3.9`、MIT 许可证、依赖 `psutil>=5.9`、14 个 PyPI 分类器
   （开发阶段 / 平台 / Python 版本 / 主题）、Homepage / Issues / Changelog 链接；
