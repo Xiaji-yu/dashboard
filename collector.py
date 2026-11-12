@@ -938,11 +938,15 @@ class Collector:
             for item in items:
                 if not item.current:
                     continue
+                celsius = round(item.current, 1)
+                if celsius < -60 or celsius > 200:
+                    # 物理上不可能的读数（坏传感器会报 -273.1°C 这类值）：跳过，
+                    # 宁可整块显示「不可用」也不展示假温度
+                    continue
                 key, label = temp_entry_key(chip, item.label)
-                entries.append({"key": key, "label": label,
-                                "celsius": round(item.current, 1)})
+                entries.append({"key": key, "label": label, "celsius": celsius})
         if not entries:
-            return {"available": False, "reason": "本机没有可读的温度传感器"}
+            return {"available": False, "reason": "本机没有可读的温度传感器（或读数全部异常）"}
         unique = []
         seen = set()
         for entry in sorted(entries, key=lambda item: item["key"]):

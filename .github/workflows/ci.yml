@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   test:
-    name: 测试与风格检查（Python ${{ matrix.python-version }} @ ${{ matrix.os }}）
+    name: 测试与风格检查（Python ${{ matrix.python-version }}）
     runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
 
     strategy:

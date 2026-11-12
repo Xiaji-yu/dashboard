@@ -213,7 +213,7 @@ fi
 # ---------- t6：本地领先 → 拒绝 ff-only ----------
 new_sandbox t6
 write_unit_env "$WC" 18765
-git -C "$WC" commit -q --allow-empty -m "local only"
+git -C "$WC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "local only"
 out="$(run_update --no-restart)"; rc=$?
 if [ "$rc" -ne 0 ] && contains "$out" "未推送提交"; then
   ok "本地领先 → 拒绝 ff-only"

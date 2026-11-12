@@ -1000,6 +1000,31 @@ class DegradationTest(unittest.TestCase):
         self.assertFalse(result["available"])
         self.assertIn("传感器", result["reason"])
 
+    def test_temperature_drops_implausible_readings(self):
+        """坏传感器会报 -273.1°C 这类物理不可能值：过滤掉，不展示假温度。"""
+        collector = self._bare_collector()
+        sensors = {
+            "coretemp": [
+                mock.Mock(label="Package id 0", current=-273.1),
+                mock.Mock(label="Core 0", current=45.0),
+                mock.Mock(label="Core 1", current=0.0),     # 假值（falsy）本就会被跳过
+                mock.Mock(label="Core 2", current=999.0),   # 物理不可能
+            ],
+        }
+        with mock.patch.object(psutil, "sensors_temperatures", return_value=sensors):
+            result = collector._all_temps()
+        self.assertTrue(result["available"])
+        self.assertEqual([e["celsius"] for e in result["list"]], [45.0])
+
+    def test_temperature_all_implausible_is_unavailable(self):
+        """全部读数都不可能时：整块按不可用处理并给出原因。"""
+        collector = self._bare_collector()
+        sensors = {"coretemp": [mock.Mock(label="Package id 0", current=-273.1)]}
+        with mock.patch.object(psutil, "sensors_temperatures", return_value=sensors):
+            result = collector._all_temps()
+        self.assertFalse(result["available"])
+        self.assertTrue(result["reason"])
+
     def test_net_without_nic(self):
         collector = self._bare_collector()
         collector.nic = None
