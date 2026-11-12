@@ -16,17 +16,12 @@ permissions:
 jobs:
   test:
     name: 测试与风格检查（Python ${{ matrix.python-version }} @ ${{ matrix.os }}）
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.python-version == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
 
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.11", "3.12", "3.13"]
-        os: [ubuntu-latest]
-        # 新版 runner 镜像不再提供 Python 3.9：老版本固定在 24.04 镜像上测
-        include:
-          - python-version: "3.9"
-            os: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4

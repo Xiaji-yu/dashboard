@@ -63,6 +63,16 @@ exit 0
 STUB
 chmod +x "$BIN/systemctl" "$BIN/sudo" "$BIN/journalctl"
 
+# 沙箱 venv：update.sh 会按 unit 里的 ExecStart 找解释器并检查 psutil，
+# CI 的系统 python 没有 psutil，所以给它一个确定可用的解释器
+VENV="$WORK/venv"
+if ! python3 -m venv "$VENV"; then
+  echo "无法创建沙箱 venv（缺 python3-venv？）" >&2
+  exit 1
+fi
+"$VENV/bin/python" -m pip install --disable-pip-version-check -q psutil \
+  || { echo "沙箱 venv 安装 psutil 失败" >&2; exit 1; }
+
 # unit.env：测试写的「systemd 里那条 unit」
 write_unit_env() { # $1 wc  $2 端口  [$3 WorkingDirectory]  [$4 LoadState（absent=unit 不存在）]
   cat > "$WORK/unit.env" <<EOF
@@ -71,7 +81,7 @@ ActiveState=${4:-active}
 User=$(id -un)
 WorkingDirectory=${3:-$1}
 Environment=DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=$2 DASHBOARD_INTERVAL=1.0
-ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 $1/server.py ; ignore_errors=no ; start_time=[x] ; stop_time=[n/a] ; pid=1 ; code=(null) ; status=0/0 }
+ExecStart={ path=$VENV/bin/python ; argv[]=$VENV/bin/python $1/server.py ; ignore_errors=no ; start_time=[x] ; stop_time=[n/a] ; pid=1 ; code=(null) ; status=0/0 }
 EOF
 }
 
